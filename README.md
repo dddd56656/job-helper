@@ -35,3 +35,10 @@ vless://2d535288-d08e-4de4-b674-fd8cb3c6e4d3@141.227.172.96:56089?encryption=non
 
 
 ![image-20251130092130017](README.assets/image-20251130092130017.png)
+
+
+
+如果有需要避雷的公司，请直接new isuue, 会进行调查然后默认排掉
+
+
+
