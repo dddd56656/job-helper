@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name        招聘网站全能助手 (v21.0 智能跳过版)
+// @name        招聘网站全能助手 (v23.0 弹窗终结者)
 // @namespace   http://tampermonkey.net/
-// @version     21.0
-// @description 一键批量投递并屏蔽！自动跳过已屏蔽公司，极速去弹窗，效率更高。
+// @version     23.0
+// @description 修复“已发送”弹窗导致流程卡死的问题。移除强制隐藏，改为主动点击“留在此页”以释放页面状态。
 // @author      Gemini (Modified by Google CTO Persona)
 // @match       *://www.zhipin.com/*
 // @match       *://*.51job.com/*
@@ -17,29 +17,30 @@
 (function() {
     'use strict';
 
-    // --- 1. 配置模块 (Configuration) ---
-    // 定义全局常量、UI层级及反爬虫策略参数
+    // --- 1. Configuration ---
     const CONFIG = {
         STORAGE_KEY: 'universal_job_blacklist',
-        UI_Z_INDEX: 2147483647, // 确保 UI 覆盖在所有页面元素之上
-        REFRESH_INTERVAL_MS: 1000, // DOM 扫描轮询间隔
-        // 批量操作时的随机延迟范围 (毫秒)，模拟人类操作以规避风控
+        UI_Z_INDEX: 2147483647,
+        REFRESH_INTERVAL_MS: 1000,
         BATCH_DELAY_MIN: 2000,
         BATCH_DELAY_MAX: 4000,
-        DEFAULT_GREETING: '你好，我对这个职位很感兴趣，希望能有机会聊聊。'
+        DEFAULT_GREETING: '你好，我对这个职位很感兴趣，希望能有机会聊聊。',
+        DETAIL_LOAD_TIMEOUT: 3000
     };
 
-    // 针对不同站点的 DOM 选择器配置 (策略模式)
     const SITE_CONFIGS = {
         boss: {
-            // 职位卡片、公司名称、聊天按钮等关键元素的 CSS 选择器列表
             cardSelectors: ['.job-card-box', '.job-card-wrapper', 'li.job-primary', '.job-list-ul > li', '.job-card-body'],
             nameSelectors: ['.boss-name', '.company-name a', '.company-name', '.job-company span.company-text', '.company-text h3'],
-            chatBtnSelectors: ['.start-chat-btn', '.op-btn-chat', '.btn-startchat', '.btn-container .btn-sure'],
+            chatBtnSelectors: ['.start-chat-btn', '.btn-startchat'],
             detailPanelSelector: '.job-detail-container, .job-detail-box',
+            detailSubmitSelector: '.op-btn-chat, .btn-sure, .btn-startchat, .op-btn-chat',
 
-            // 弹窗处理相关选择器
-            dialogSelector: '.dialog-container, .greet-boss-dialog',
+            // 针对“已发送”弹窗的特定选择器
+            sentDialogSelector: '.greet-boss-dialog',
+            sentDialogCloseSelector: '.cancel-btn, .close', // 优先点击“留在此页”(.cancel-btn)，其次点叉
+
+            dialogSelector: '.dialog-container', // 普通沟通弹窗
             dialogInputSelector: 'textarea',
             dialogSubmitSelector: '.btn-sure, .btn-startchat',
             dialogStaySelector: '.cancel-btn, .btn-cancel, .btn-close, .close',
@@ -49,16 +50,14 @@
         job51: {
             cardSelectors: ['.joblist-item', '.j_joblist .e', '.el', '.job-list-item'],
             nameSelectors: ['.cname a', '.cname', '.t2 a', '.er a', '.company_name'],
-            chatBtnSelectors: [], // 51job 暂未实现自动沟通
+            chatBtnSelectors: [],
             key: '51job'
         }
     };
 
-    // 根据当前域名确定使用的站点配置
     const currentSiteConfig = location.host.includes('zhipin.com') ? SITE_CONFIGS.boss : SITE_CONFIGS.job51;
 
-    // --- 2. 状态管理 (State Management) ---
-    // 维护运行时状态，防止批量操作冲突
+    // --- 2. State Management ---
     const State = {
         isBatchRunning: false,
         stopBatchSignal: false,
@@ -66,12 +65,9 @@
         totalCount: 0
     };
 
-    // --- 3. 存储模块 (Storage Module) ---
-    // 封装 Tampermonkey 的存储 API，用于持久化黑名单数据
+    // --- 3. Storage Module ---
     const Storage = {
         getBlacklist: () => GM_getValue(CONFIG.STORAGE_KEY, []),
-
-        // 添加公司到黑名单（去重）
         addCompany: (name) => {
             if (!name) return false;
             const list = Storage.getBlacklist();
@@ -83,12 +79,10 @@
             }
             return false;
         },
-
         removeCompany: (name) => {
             const list = Storage.getBlacklist().filter(n => n !== name);
             GM_setValue(CONFIG.STORAGE_KEY, list);
         },
-
         isBlocked: (name) => {
             if(!name) return false;
             const list = Storage.getBlacklist();
@@ -96,19 +90,16 @@
         }
     };
 
-    // --- 4. UI 模块 (UI Module) ---
-    // 负责样式注入和悬浮窗/面板的 DOM 构建
+    // --- 4. UI Module ---
     const UI = {
         injectStyles: () => {
-            // 使用模板字符串构建 CSS，包含操作栏、高亮样式、悬浮球及弹窗隐藏逻辑
             const styles = `
-                /* --- 操作栏样式 (Action Bar) --- */
+                /* Action Bar */
                 .boss-action-bar {
                     position: absolute; top: 0; right: 0; z-index: 999;
                     display: none; border-bottom-left-radius: 8px; overflow: hidden;
                     box-shadow: -2px 2px 8px rgba(0,0,0,0.15); background: white;
                 }
-                /* 鼠标悬停显示操作栏 */
                 ${currentSiteConfig.cardSelectors.map(s => `${s}:hover .boss-action-bar`).join(', ')} { display: flex !important; }
                 .job-card-body:hover .boss-action-bar { display: flex !important; }
 
@@ -122,12 +113,12 @@
                 .boss-btn-block { background: #ff4d4f; }
                 .boss-btn-block:hover { background: #d9363e; }
 
-                /* --- 状态样式 --- */
+                /* States */
                 .boss-applied { background-color: #f0f9eb !important; opacity: 0.8; border-left: 4px solid #67c23a; }
                 .boss-btn-applied { background: #67c23a !important; cursor: default; pointer-events: none; }
-                .universal-blocked { display: none !important; } /* 隐藏被屏蔽的公司 */
+                .universal-blocked { display: none !important; }
 
-                /* --- 悬浮球 (FAB) --- */
+                /* FAB */
                 #universal-helper-fab {
                     position: fixed; bottom: 100px; right: 30px; width: 48px; height: 48px;
                     background: #4285f4; color: white; border-radius: 50%;
@@ -137,7 +128,7 @@
                 }
                 #universal-helper-fab:hover { transform: scale(1.1); }
 
-                /* --- 控制面板 --- */
+                /* Panel */
                 #universal-panel {
                     position: fixed; bottom: 160px; right: 30px; width: 320px;
                     max-height: 600px; background: white; border: 1px solid #ddd;
@@ -160,7 +151,7 @@
                 .u-item { padding: 10px 16px; border-bottom: 1px solid #f1f3f4; display: flex; justify-content: space-between; }
                 .u-remove { color: #ff4d4f; cursor: pointer; }
 
-                /* --- 进度覆盖层 --- */
+                /* Progress Overlay */
                 #batch-progress-overlay {
                     position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
                     background: rgba(0,0,0,0.8); color: white; padding: 10px 20px;
@@ -176,14 +167,8 @@
 
                 body[data-site="51job"] #universal-helper-fab { background: #ff6000; }
 
-                /* --- 隐形模式：隐藏特定弹窗 --- */
-                .greet-boss-dialog {
-                    display: none !important;
-                    opacity: 0 !important;
-                    pointer-events: none !important;
-                }
+                /* 移除 v22 中对 .greet-boss-dialog 的 display: none 隐藏，改为让 JS 自动点击 */
             `;
-
             if (typeof GM_addStyle !== 'undefined') GM_addStyle(styles);
             else {
                 const s = document.createElement('style');
@@ -192,13 +177,11 @@
             }
             document.body.setAttribute('data-site', currentSiteConfig.key);
         },
-
         init: () => {
             UI.createFab();
             UI.createPanel();
             UI.createProgressOverlay();
         },
-
         createFab: () => {
             const fab = document.createElement('div');
             fab.id = 'universal-helper-fab';
@@ -206,14 +189,12 @@
             fab.onclick = () => UI.togglePanel();
             document.body.appendChild(fab);
         },
-
         createPanel: () => {
             const panel = document.createElement('div');
             panel.id = 'universal-panel';
-            // 动态生成面板 HTML
             panel.innerHTML = `
                 <div class="u-header">
-                    <span>全能助手 v21</span>
+                    <span>全能助手 v23</span>
                     <span style="cursor:pointer" onclick="this.parentElement.parentElement.style.display='none'">×</span>
                 </div>
                 <div class="u-content">
@@ -221,16 +202,14 @@
                     `<div class="u-section">
                         <button id="u-batch-run" class="u-batch-btn">一键投递并屏蔽本页</button>
                         <div style="font-size:12px;color:#999">
-                            自动逐个投递当前页职位，投递后立即屏蔽。<br>
-                            <span style="color:orange">⚠ 请保持页面前台运行</span>
+                            自动点击列表 -> 等待详情加载 -> 投递。<br>
+                            <span style="color:orange">⚠ 必须保持浏览器窗口前台可见</span>
                         </div>
                     </div>` : ''}
                     <div class="u-list-header">🚫 已屏蔽 (<span id="u-count">0</span>)</div>
                     <div id="u-list"></div>
                 </div>`;
             document.body.appendChild(panel);
-
-            // 绑定批量运行按钮事件
             const batchBtn = document.getElementById('u-batch-run');
             if (batchBtn) {
                 batchBtn.onclick = () => {
@@ -244,14 +223,12 @@
                 };
             }
         },
-
         createProgressOverlay: () => {
             const div = document.createElement('div');
             div.id = 'batch-progress-overlay';
             div.innerHTML = `<div class="spinner"></div><span id="batch-status-text">正在处理...</span>`;
             document.body.appendChild(div);
         },
-
         updateProgress: (current, total, statusText) => {
             const overlay = document.getElementById('batch-progress-overlay');
             const text = document.getElementById('batch-status-text');
@@ -260,12 +237,10 @@
                 text.innerText = `正在处理: ${current}/${total} - ${statusText}`;
             }
         },
-
         hideProgress: () => {
             const overlay = document.getElementById('batch-progress-overlay');
             if (overlay) overlay.style.display = 'none';
         },
-
         togglePanel: () => {
             const panel = document.getElementById('universal-panel');
             if (panel.style.display === 'flex') {
@@ -275,8 +250,6 @@
                 UI.renderList();
             }
         },
-
-        // 渲染黑名单列表
         renderList: () => {
             const list = Storage.getBlacklist();
             document.getElementById('u-count').innerText = list.length;
@@ -289,26 +262,19 @@
                 div.querySelector('.u-remove').onclick = () => {
                     Storage.removeCompany(name);
                     UI.renderList();
-                    Core.refresh(); // 更新当前页面元素的可见性
+                    Core.refresh();
                 };
                 container.appendChild(div);
             });
         }
     };
 
-    // --- 5. 自动化模块 (Automation Module) ---
-    // 处理模拟用户交互、输入填充及批量流程控制
+    // --- 5. Automation Module ---
     const Automation = {
-        /**
-         * 绕过 React/Vue 框架限制设置输入框值。
-         * 框架通常重写了 value 属性的 setter，直接赋值不会触发状态更新。
-         * 此方法调用原生 setter 并分发 input 事件。
-         */
         setNativeValue: (element, value) => {
             const valueSetter = Object.getOwnPropertyDescriptor(element, 'value').set;
             const prototype = Object.getPrototypeOf(element);
             const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
-
             if (valueSetter && valueSetter !== prototypeValueSetter) {
                 prototypeValueSetter.call(element, value);
             } else {
@@ -317,123 +283,108 @@
             element.dispatchEvent(new Event('input', { bubbles: true }));
         },
 
-        // 监听并自动处理弹窗 (如：打招呼确认窗)
+        // --- 核心修复：弹窗监控 ---
         monitorDialog: () => {
             if (currentSiteConfig.key !== 'boss') return;
 
+            // 1. 常规 MutationObserver (处理 DOM 变动)
             const observer = new MutationObserver((mutations) => {
                 for (const m of mutations) {
                     if (m.addedNodes.length > 0) {
+                        // 处理普通沟通填词弹窗
                         const dialog = document.querySelector(currentSiteConfig.dialogSelector);
-
-                        if (dialog) {
-                            // 1. 如果是默认打招呼弹窗，尝试留在当前页或关闭
-                            if (dialog.classList.contains('greet-boss-dialog')) {
-                                const stayBtn = dialog.querySelector(currentSiteConfig.dialogStaySelector);
-                                if (stayBtn) stayBtn.click();
-                                else {
-                                    const closeBtn = dialog.querySelector('.close, .icon-close');
-                                    if (closeBtn) closeBtn.click();
-                                }
-                            }
-
-                            // 2. 如果是自定义沟通弹窗，自动填充并发送
-                            if (!dialog.dataset.bossHelperProcessed) {
-                                dialog.dataset.bossHelperProcessed = 'true';
-
-                                const textarea = dialog.querySelector(currentSiteConfig.dialogInputSelector);
-                                if (textarea) {
-                                    setTimeout(() => {
-                                        Automation.setNativeValue(textarea, CONFIG.DEFAULT_GREETING);
-                                    }, 100);
-                                    setTimeout(() => {
-                                        const submitBtn = dialog.querySelector(currentSiteConfig.dialogSubmitSelector);
-                                        if (submitBtn) submitBtn.click();
-                                    }, 300);
-                                    return;
-                                }
-
-                                // 3. 兜底处理：寻找"关闭"或"取消"按钮
+                        if (dialog && !dialog.classList.contains('greet-boss-dialog') && !dialog.dataset.bossHelperProcessed) {
+                            dialog.dataset.bossHelperProcessed = 'true';
+                            const textarea = dialog.querySelector(currentSiteConfig.dialogInputSelector);
+                            if (textarea) {
                                 setTimeout(() => {
-                                    const buttons = Array.from(dialog.querySelectorAll('button, .btn, a.default-btn'));
-                                    let stayBtn = null;
-                                    for (const btn of buttons) {
-                                        if (btn.innerText.includes('留在此页') || btn.innerText.includes('取消')) {
-                                            stayBtn = btn;
-                                            break;
-                                        }
-                                    }
-                                    if (!stayBtn) stayBtn = dialog.querySelector(currentSiteConfig.dialogStaySelector);
-
-                                    if (stayBtn) stayBtn.click();
-                                    else {
-                                        const closeBtn = dialog.querySelector('.close, .icon-close');
-                                        if (closeBtn) closeBtn.click();
-                                    }
-                                }, 200);
+                                    Automation.setNativeValue(textarea, CONFIG.DEFAULT_GREETING);
+                                }, 100);
+                                setTimeout(() => {
+                                    const submitBtn = dialog.querySelector(currentSiteConfig.dialogSubmitSelector);
+                                    if (submitBtn) submitBtn.click();
+                                }, 300);
                             }
                         }
                     }
                 }
             });
             observer.observe(document.body, { childList: true, subtree: true });
+
+            // 2. 弹窗杀手 (高频轮询，专门处理“已发送”弹窗)
+            setInterval(() => {
+                const sentDialog = document.querySelector(currentSiteConfig.sentDialogSelector);
+                // 只要弹窗存在且可见，就立即处理
+                if (sentDialog && getComputedStyle(sentDialog).display !== 'none') {
+                    console.log('[BossHelper] 检测到已发送弹窗，正在关闭...');
+                    const cancelBtn = sentDialog.querySelector('.cancel-btn'); // 优先点击“留在此页”
+                    const closeBtn = sentDialog.querySelector('.close');
+
+                    if (cancelBtn) {
+                        cancelBtn.click();
+                        console.log('[BossHelper] 点击了“留在此页”');
+                    } else if (closeBtn) {
+                        closeBtn.click();
+                        console.log('[BossHelper] 点击了关闭图标');
+                    }
+                }
+            }, 500); // 每500毫秒检查一次，确保及时释放页面
         },
 
-        // 执行单个职位的投递逻辑
         applyJob: (card) => {
             return new Promise((resolve) => {
-                // 查找聊天按钮
                 let chatBtn = null;
-                for (const s of currentSiteConfig.chatBtnSelectors) {
-                    chatBtn = card.querySelector(s);
-                    if (chatBtn) break;
-                }
-                // 模糊匹配兜底
-                if (!chatBtn) {
-                    const candidates = card.querySelectorAll('a, button, div[role="button"]');
-                    for (const el of candidates) {
-                        if (el.innerText.includes('立即沟通') || el.innerText.includes('继续沟通')) {
-                            chatBtn = el;
-                            break;
-                        }
+                if (currentSiteConfig.chatBtnSelectors && currentSiteConfig.chatBtnSelectors.length > 0) {
+                     for (const s of currentSiteConfig.chatBtnSelectors) {
+                        chatBtn = card.querySelector(s);
+                        if (chatBtn) break;
                     }
                 }
 
-                // 如果列表页无按钮，尝试点击进入详情页 (兼容某些 UI 布局)
-                if (!chatBtn) {
-                    const detailPanel = document.querySelector(currentSiteConfig.detailPanelSelector);
-                    if (detailPanel && detailPanel.offsetParent !== null) {
-                        const clickTarget = card.querySelector('.job-info') || card;
-                        clickTarget.click();
-
-                        setTimeout(() => {
-                            const detailBtn = detailPanel.querySelector(currentSiteConfig.dialogSubmitSelector) ||
-                                            Array.from(detailPanel.querySelectorAll('a, button')).find(el => el.innerText.includes('沟通'));
-                            if (detailBtn) {
-                                detailBtn.click();
-                                Automation.markApplied(card);
-                                resolve(true);
-                            } else {
-                                resolve(false);
-                            }
-                        }, 800);
-                        return;
-                    }
-                }
-
-                if (!chatBtn) {
-                    resolve(false);
+                if (chatBtn) {
+                    chatBtn.click();
+                    Automation.markApplied(card);
+                    setTimeout(() => resolve(true), 800);
                     return;
                 }
 
-                chatBtn.click();
-                Automation.markApplied(card);
+                const clickTarget = card.querySelector('.job-info') || card;
+                clickTarget.click();
 
-                setTimeout(() => resolve(true), 800);
+                const startTime = Date.now();
+                const checkInterval = setInterval(() => {
+                    if (Date.now() - startTime > CONFIG.DETAIL_LOAD_TIMEOUT) {
+                        clearInterval(checkInterval);
+                        console.warn('[BossHelper] 等待详情页按钮超时');
+                        resolve(false);
+                        return;
+                    }
+
+                    const detailPanel = document.querySelector(currentSiteConfig.detailPanelSelector);
+                    if (detailPanel) {
+                        const detailBtn = detailPanel.querySelector(currentSiteConfig.detailSubmitSelector);
+
+                        if (detailBtn && detailBtn.offsetParent !== null) {
+                            const btnText = detailBtn.innerText;
+                            if (btnText.includes('沟通') || btnText.includes('Chat')) {
+                                clearInterval(checkInterval);
+                                detailBtn.click();
+                                Automation.markApplied(card);
+                                console.log('[BossHelper] 详情页投递成功');
+                                resolve(true);
+                                return;
+                            } else if (btnText.includes('继续') || btnText.includes('已')) {
+                                clearInterval(checkInterval);
+                                Automation.markApplied(card);
+                                resolve(true);
+                                return;
+                            }
+                        }
+                    }
+                }, 200);
             });
         },
 
-        // 标记 UI 为已投递状态
         markApplied: (card) => {
             card.classList.add('boss-applied');
             const btn = card.querySelector('.boss-btn-apply');
@@ -443,17 +394,14 @@
             }
         },
 
-        // 批量运行逻辑: 遍历 -> 检查屏蔽 -> 投递 -> 屏蔽 -> 随机延迟
         runBatch: async () => {
             if (State.isBatchRunning) return;
             State.isBatchRunning = true;
             State.stopBatchSignal = false;
-
             const btn = document.getElementById('u-batch-run');
             if(btn) { btn.innerText = '停止运行'; btn.classList.add('running'); }
 
             const selector = currentSiteConfig.cardSelectors.join(',');
-            // 过滤掉已屏蔽和已投递的卡片
             const cards = Array.from(document.querySelectorAll(selector)).filter(card => {
                 return !card.classList.contains('universal-blocked') && !card.classList.contains('boss-applied');
             });
@@ -469,37 +417,29 @@
 
             for (let i = 0; i < cards.length; i++) {
                 if (State.stopBatchSignal) break;
-
                 State.processedCount++;
                 const card = cards[i];
                 const companyName = Core.getCompanyName(card);
 
-                // --- 关键防御：再次检查是否在黑名单中，防止 race condition ---
                 if (companyName && Storage.isBlocked(companyName)) {
-                    console.log(`[BossHelper] 跳过已屏蔽公司: ${companyName}`);
                     UI.updateProgress(State.processedCount, State.totalCount, `跳过已屏蔽: ${companyName}`);
                     Core.updateVisibility(card, Storage.getBlacklist());
                     continue;
                 }
 
-                // 滚动到视图中心，模拟人类浏览行为
                 card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                UI.updateProgress(State.processedCount, State.totalCount, `投递中: ${companyName || '未知'}`);
+                UI.updateProgress(State.processedCount, State.totalCount, `正在投递: ${companyName || '未知'}`);
 
-                // 1. 执行投递
                 await Automation.applyJob(card);
 
-                // 2. 投递后立即加入黑名单 (实现"投递并屏蔽"需求)
                 if (companyName) {
                     Storage.addCompany(companyName);
                     Core.updateVisibility(card, Storage.getBlacklist());
                 }
 
-                // 3. 随机延迟，避免触发反爬虫机制
                 const waitTime = Math.floor(Math.random() * (CONFIG.BATCH_DELAY_MAX - CONFIG.BATCH_DELAY_MIN + 1)) + CONFIG.BATCH_DELAY_MIN;
                 await new Promise(r => setTimeout(r, waitTime));
             }
-
             Automation.finishBatch();
         },
 
@@ -508,7 +448,6 @@
             const btn = document.getElementById('u-batch-run');
             if(btn) btn.innerText = '正在停止...';
         },
-
         finishBatch: () => {
             State.isBatchRunning = false;
             const btn = document.getElementById('u-batch-run');
@@ -518,8 +457,7 @@
         }
     };
 
-    // --- 6. 核心逻辑 (Core Logic) ---
-    // 负责 DOM 解析、数据提取和操作栏注入
+    // --- 6. Core Logic ---
     const Core = {
         getCompanyName: (card) => {
             let companyName = '';
@@ -529,7 +467,6 @@
             }
             return companyName;
         },
-
         processCard: (card, blacklist) => {
             if (card.dataset.uProcessed === 'true') {
                 Core.updateVisibility(card, blacklist);
@@ -537,34 +474,26 @@
             }
             const companyName = Core.getCompanyName(card);
             if (!companyName) return;
-
             card.dataset.companyName = companyName;
             Core.injectActionBar(card, companyName);
             Core.updateVisibility(card, blacklist);
             card.dataset.uProcessed = 'true';
         },
-
-        // 在职位卡片上注入 "投递" 和 "屏蔽" 按钮
         injectActionBar: (card, name) => {
             if (window.getComputedStyle(card).position === 'static') card.style.position = 'relative';
             if (card.querySelector('.boss-action-bar')) return;
-
             const bar = document.createElement('div');
             bar.className = 'boss-action-bar';
-
             if (currentSiteConfig.key === 'boss') {
                 const apply = document.createElement('div');
                 apply.className = 'boss-action-btn boss-btn-apply';
                 apply.innerText = '🚀 投递';
                 apply.onclick = (e) => {
                     e.stopPropagation(); e.preventDefault();
-                    Automation.applyJob(card).then(() => {
-                         // 可以在此添加单次点击后的回调逻辑
-                    });
+                    Automation.applyJob(card);
                 };
                 bar.appendChild(apply);
             }
-
             const block = document.createElement('div');
             block.className = 'boss-action-btn boss-btn-block';
             block.innerText = '🚫 屏蔽';
@@ -578,7 +507,6 @@
             bar.appendChild(block);
             card.appendChild(bar);
         },
-
         updateVisibility: (card, blacklist) => {
             if (blacklist.includes(card.dataset.companyName)) {
                 card.classList.add('universal-blocked');
@@ -586,31 +514,26 @@
                 card.classList.remove('universal-blocked');
             }
         },
-
         refresh: () => {
             const list = Storage.getBlacklist();
             document.querySelectorAll(currentSiteConfig.cardSelectors.join(',')).forEach(c => Core.updateVisibility(c, list));
         },
-
-        // 初始化 DOM 扫描器，支持 SPA (单页应用) 动态加载
         initScanner: () => {
             const run = () => {
                 const list = Storage.getBlacklist();
                 const selector = currentSiteConfig.cardSelectors.join(',');
                 document.querySelectorAll(selector).forEach(c => Core.processCard(c, list));
             };
-            // 使用 MutationObserver 监听 DOM 变化
             new MutationObserver(run).observe(document.body, { childList: true, subtree: true });
-            // 定时器轮询作为 MutationObserver 的补充
             setInterval(run, CONFIG.REFRESH_INTERVAL_MS);
             run();
         }
     };
 
-    // --- 7. 初始化 (Initialization) ---
+    // --- 7. Initialization ---
     const App = {
         init: () => {
-            console.log(`[BossHelper v21] Loaded for ${currentSiteConfig.key}`);
+            console.log(`[BossHelper v23] Loaded for ${currentSiteConfig.key} (Dialog Killer Enabled)`);
             UI.injectStyles();
             UI.init();
             Core.initScanner();
