@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name        招聘网站全能助手 (v24.0 企业级性能版)
+// @name        招聘网站全能助手 (v25.0 数据迁移版)
 // @namespace   http://tampermonkey.net/
-// @version     24.0
-// @description 支持10万+级黑名单依然丝滑流畅。引入 Set 哈希算法与内存缓存机制，保留“弹窗杀手”与“自动投递”功能。
+// @version     25.0
+// @description 支持黑名单数据导出/导入，方便跨电脑同步。底层采用 Set+内存缓存，性能强悍。
 // @author      Gemini (Modified by Google CTO Persona)
 // @match       *://www.zhipin.com/*
 // @match       *://*.51job.com/*
@@ -61,45 +61,37 @@
         totalCount: 0
     };
 
-    // --- 3. Storage Module (High Performance Refactor) ---
-    // 核心重构：引入 Set + 内存缓存，解决 10w+ 数据卡顿问题
+    // --- 3. Storage Module (Data IO Support) ---
     const Storage = {
-        // 内存缓存，使用 Set 实现 O(1) 复杂度查找
         cache: new Set(),
         initialized: false,
 
-        // 初始化：从本地存储加载数据到内存 Set
         init: () => {
             if (Storage.initialized) return;
-            console.time('LoadBlacklist');
+            // console.time('LoadBlacklist');
             const rawList = GM_getValue(CONFIG.STORAGE_KEY, []);
-            // 将数组转换为 Set，去除重复并优化查询
             Storage.cache = new Set(rawList);
             Storage.initialized = true;
-            console.timeEnd('LoadBlacklist');
-            console.log(`[BossHelper] 黑名单已加载: ${Storage.cache.size} 条数据`);
+            // console.timeEnd('LoadBlacklist');
         },
 
-        // 获取列表（将 Set 转回 Array 供 UI 渲染，注意：大数据量渲染 UI 会慢，但屏蔽检查依然快）
         getBlacklist: () => {
             if (!Storage.initialized) Storage.init();
             return Array.from(Storage.cache);
         },
 
-        // O(1) 极速添加
         addCompany: (name) => {
             if (!name) return false;
             if (!Storage.initialized) Storage.init();
             const trimmedName = name.trim();
             if (!Storage.cache.has(trimmedName)) {
                 Storage.cache.add(trimmedName);
-                Storage.persist(); // 异步持久化
+                Storage.persist();
                 return true;
             }
             return false;
         },
 
-        // O(1) 极速删除
         removeCompany: (name) => {
             if (!Storage.initialized) Storage.init();
             if (Storage.cache.delete(name)) {
@@ -107,17 +99,42 @@
             }
         },
 
-        // O(1) 极速查询：这是最关键的性能提升点
         isBlocked: (name) => {
             if (!name) return false;
             if (!Storage.initialized) Storage.init();
             return Storage.cache.has(name.trim());
         },
 
-        // 持久化：将内存 Set 写回硬盘
         persist: () => {
-            // 在数据量极大时，这里是唯一的耗时操作，但只有在添加/删除时触发，不影响滚动浏览
             GM_setValue(CONFIG.STORAGE_KEY, Array.from(Storage.cache));
+        },
+
+        // --- 新增：导入逻辑 ---
+        importData: (jsonString) => {
+            try {
+                const list = JSON.parse(jsonString);
+                if (Array.isArray(list)) {
+                    let count = 0;
+                    if (!Storage.initialized) Storage.init();
+                    list.forEach(item => {
+                        if (item && typeof item === 'string') {
+                            const t = item.trim();
+                            if (t && !Storage.cache.has(t)) {
+                                Storage.cache.add(t);
+                                count++;
+                            }
+                        }
+                    });
+                    Storage.persist();
+                    alert(`导入成功！新增了 ${count} 条数据，当前共 ${Storage.cache.size} 条。`);
+                    Core.refresh(); // 刷新页面显示
+                } else {
+                    alert('文件格式错误：必须是 JSON 数组');
+                }
+            } catch (e) {
+                alert('文件解析失败，请检查文件是否为标准 JSON 格式。');
+                console.error(e);
+            }
         }
     };
 
@@ -178,6 +195,13 @@
                 .u-batch-btn:hover { background: #d9363e; }
                 .u-batch-btn.running { background: #ccc; cursor: not-allowed; }
 
+                .u-data-btn {
+                     width: 48%; padding: 8px; font-size: 12px; cursor: pointer;
+                     border: 1px solid #ddd; background: #fff; border-radius: 4px;
+                     margin-top: 5px;
+                }
+                .u-data-btn:hover { background: #f0f0f0; }
+
                 .u-list-header { padding: 10px 16px; background: #f5f5f5; color: #666; font-size: 12px;}
                 .u-item { padding: 10px 16px; border-bottom: 1px solid #f1f3f4; display: flex; justify-content: space-between; }
                 .u-remove { color: #ff4d4f; cursor: pointer; }
@@ -221,10 +245,9 @@
         createPanel: () => {
             const panel = document.createElement('div');
             panel.id = 'universal-panel';
-            // 优化：数据量大时，面板只显示最近的50条，避免渲染卡顿
             panel.innerHTML = `
                 <div class="u-header">
-                    <span>全能助手 v24 (高性能版)</span>
+                    <span>全能助手 v25</span>
                     <span style="cursor:pointer" onclick="this.parentElement.parentElement.style.display='none'">×</span>
                 </div>
                 <div class="u-content">
@@ -232,14 +255,25 @@
                     `<div class="u-section">
                         <button id="u-batch-run" class="u-batch-btn">一键投递并屏蔽本页</button>
                         <div style="font-size:12px;color:#999">
-                            自动点击列表 -> 等待详情加载 -> 投递。<br>
-                            <span style="color:orange">⚠ 必须保持浏览器窗口前台可见</span>
+                            <span style="color:orange">⚠ 保持浏览器前台运行</span>
                         </div>
                     </div>` : ''}
-                    <div class="u-list-header">🚫 已屏蔽 (<span id="u-count">0</span>) - 仅显示最近50条</div>
+
+                    <div class="u-section" style="border-bottom: 8px solid #f5f5f5;">
+                        <div style="display:flex; justify-content:space-between;">
+                             <button id="u-btn-export" class="u-data-btn">📤 导出备份</button>
+                             <button id="u-btn-import" class="u-data-btn">📥 导入数据</button>
+                             <input type="file" id="u-file-input" style="display:none" accept=".json">
+                        </div>
+                         <div style="font-size:12px;color:#999;margin-top:5px">支持跨电脑迁移数据</div>
+                    </div>
+
+                    <div class="u-list-header">🚫 已屏蔽 (<span id="u-count">0</span>) - 最近50条</div>
                     <div id="u-list"></div>
                 </div>`;
             document.body.appendChild(panel);
+
+            // 绑定事件
             const batchBtn = document.getElementById('u-batch-run');
             if (batchBtn) {
                 batchBtn.onclick = () => {
@@ -252,6 +286,33 @@
                     }
                 };
             }
+
+            // 导出逻辑
+            document.getElementById('u-btn-export').onclick = () => {
+                const data = Storage.getBlacklist();
+                const blob = new Blob([JSON.stringify(data)], {type: "application/json"});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `job_helper_blacklist_${new Date().toISOString().slice(0,10)}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+
+            // 导入逻辑
+            document.getElementById('u-btn-import').onclick = () => {
+                document.getElementById('u-file-input').click();
+            };
+            document.getElementById('u-file-input').onchange = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    Storage.importData(event.target.result);
+                    e.target.value = ''; // 重置，允许重复导入同名文件
+                };
+                reader.readAsText(file);
+            };
         },
         createProgressOverlay: () => {
             const div = document.createElement('div');
@@ -285,7 +346,6 @@
             document.getElementById('u-count').innerText = list.length;
             const container = document.getElementById('u-list');
             container.innerHTML = '';
-            // 优化：只渲染最近的 50 条，防止 DOM 过多导致面板卡顿
             [...list].slice(-50).reverse().forEach(name => {
                 const div = document.createElement('div');
                 div.className = 'u-item';
@@ -340,7 +400,7 @@
             setInterval(() => {
                 const sentDialog = document.querySelector(currentSiteConfig.sentDialogSelector);
                 if (sentDialog && getComputedStyle(sentDialog).display !== 'none') {
-                    console.log('[BossHelper] 检测到已发送弹窗，正在关闭...');
+                    // console.log('[BossHelper] 检测到已发送弹窗，正在关闭...');
                     const cancelBtn = sentDialog.querySelector('.cancel-btn');
                     const closeBtn = sentDialog.querySelector('.close');
                     if (cancelBtn) cancelBtn.click();
@@ -382,7 +442,6 @@
                                 clearInterval(checkInterval);
                                 detailBtn.click();
                                 Automation.markApplied(card);
-                                console.log('[BossHelper] 详情页投递成功');
                                 resolve(true);
                                 return;
                             } else if (btnText.includes('继续') || btnText.includes('已')) {
@@ -471,14 +530,14 @@
         },
         processCard: (card, blacklist) => {
             if (card.dataset.uProcessed === 'true') {
-                Core.updateVisibility(card, blacklist); // 就算处理过，也要重新检查屏蔽状态，因为黑名单可能更新
+                Core.updateVisibility(card);
                 return;
             }
             const companyName = Core.getCompanyName(card);
             if (!companyName) return;
             card.dataset.companyName = companyName;
             Core.injectActionBar(card, companyName);
-            Core.updateVisibility(card, blacklist); // 传入blacklist参数其实不再重要，因为isBlocked现在走内存
+            Core.updateVisibility(card);
             card.dataset.uProcessed = 'true';
         },
         injectActionBar: (card, name) => {
@@ -510,7 +569,6 @@
             card.appendChild(bar);
         },
         updateVisibility: (card) => {
-            // 优化：直接调用内存级 isBlocked，无需传递 huge array
             if (Storage.isBlocked(card.dataset.companyName)) {
                 card.classList.add('universal-blocked');
             } else {
@@ -518,11 +576,10 @@
             }
         },
         refresh: () => {
-            // 刷新时不需要获取整个列表，直接遍历 DOM 让每个元素自己去查 Cache
             document.querySelectorAll(currentSiteConfig.cardSelectors.join(',')).forEach(c => Core.updateVisibility(c));
         },
         initScanner: () => {
-            Storage.init(); // 启动时预加载黑名单到内存
+            Storage.init();
             const run = () => {
                 const selector = currentSiteConfig.cardSelectors.join(',');
                 document.querySelectorAll(selector).forEach(c => Core.processCard(c));
@@ -536,7 +593,7 @@
     // --- 7. Initialization ---
     const App = {
         init: () => {
-            console.log(`[BossHelper v24] Loaded for ${currentSiteConfig.key} (Performance: High)`);
+            console.log(`[BossHelper v25] Loaded (IO Enabled)`);
             UI.injectStyles();
             UI.init();
             Core.initScanner();
