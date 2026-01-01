@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name        招聘网站全能助手 (v25.0 数据迁移版)
+// @name        招聘网站全能助手 (v33.0 智能限频版)
 // @namespace   http://tampermonkey.net/
-// @version     25.0
-// @description 支持黑名单数据导出/导入，方便跨电脑同步。底层采用 Set+内存缓存，性能强悍。
-// @author      Gemini (Modified by Google CTO Persona)
+// @version     33.0
+// @description 修复Boss直聘加载问题。采用“组合拳”触发加载，但限制最多尝试3次，防止到底后无限空转。
+// @author      Gemini (Fixed by Google Expert)
 // @match       *://www.zhipin.com/*
 // @match       *://*.51job.com/*
 // @match       *://search.51job.com/*
@@ -17,30 +17,25 @@
 (function() {
     'use strict';
 
-    // --- 1. Configuration ---
+    // --- 1. 配置参数 ---
     const CONFIG = {
         STORAGE_KEY: 'universal_job_blacklist',
         UI_Z_INDEX: 2147483647,
-        REFRESH_INTERVAL_MS: 1000,
-        BATCH_DELAY_MIN: 2000,
-        BATCH_DELAY_MAX: 4000,
-        DEFAULT_GREETING: '你好，我对这个职位很感兴趣，希望能有机会聊聊。',
-        DETAIL_LOAD_TIMEOUT: 3000
+        REFRESH_INTERVAL_MS: 500,
+        CHECK_LOAD_INTERVAL: 1500, // 每次尝试加载的间隔
+        MIN_VISIBLE_ITEMS: 3,      // 屏幕上少于3个职位时触发
+        MAX_RETRY: 3,              // 【核心修改】最大连续重试次数设为 3次
+        DEFAULT_GREETING: '你好，我对这个职位很感兴趣，希望能有机会聊聊。'
     };
 
     const SITE_CONFIGS = {
         boss: {
             cardSelectors: ['.job-card-box', '.job-card-wrapper', 'li.job-primary', '.job-list-ul > li', '.job-card-body'],
             nameSelectors: ['.boss-name', '.company-name a', '.company-name', '.job-company span.company-text', '.company-text h3'],
-            chatBtnSelectors: ['.start-chat-btn', '.btn-startchat'],
-            detailPanelSelector: '.job-detail-container, .job-detail-box',
-            detailSubmitSelector: '.op-btn-chat, .btn-sure, .btn-startchat, .op-btn-chat',
-            sentDialogSelector: '.greet-boss-dialog',
-            sentDialogCloseSelector: '.cancel-btn, .close',
-            dialogSelector: '.dialog-container',
-            dialogInputSelector: 'textarea',
-            dialogSubmitSelector: '.btn-sure, .btn-startchat',
-            dialogStaySelector: '.cancel-btn, .btn-cancel, .btn-close, .close',
+            // 列表的直接父容器 (用于插入诱饵)
+            listContainerSelector: '.job-list-container, .rec-job-list, .job-list-box',
+            // 潜在的滚动容器
+            scrollContainerSelector: '.page-jobs-main',
             key: 'boss'
         },
         job51: {
@@ -53,33 +48,27 @@
 
     const currentSiteConfig = location.host.includes('zhipin.com') ? SITE_CONFIGS.boss : SITE_CONFIGS.job51;
 
-    // --- 2. State Management ---
+    // --- 2. 状态管理 ---
     const State = {
         isBatchRunning: false,
         stopBatchSignal: false,
-        processedCount: 0,
-        totalCount: 0
+        isAutoLoading: false,
+        retryCount: 0,        // 当前重试次数
+        lastCardCount: 0,     // 上一次检查时的卡片总数
+        hasReachedLimit: false // 是否已达到重试上限
     };
 
-    // --- 3. Storage Module (Data IO Support) ---
+    // --- 3. 存储模块 ---
     const Storage = {
         cache: new Set(),
         initialized: false,
-
         init: () => {
             if (Storage.initialized) return;
-            // console.time('LoadBlacklist');
             const rawList = GM_getValue(CONFIG.STORAGE_KEY, []);
             Storage.cache = new Set(rawList);
             Storage.initialized = true;
-            // console.timeEnd('LoadBlacklist');
         },
-
-        getBlacklist: () => {
-            if (!Storage.initialized) Storage.init();
-            return Array.from(Storage.cache);
-        },
-
+        getBlacklist: () => { if (!Storage.initialized) Storage.init(); return Array.from(Storage.cache); },
         addCompany: (name) => {
             if (!name) return false;
             if (!Storage.initialized) Storage.init();
@@ -91,25 +80,16 @@
             }
             return false;
         },
-
         removeCompany: (name) => {
             if (!Storage.initialized) Storage.init();
-            if (Storage.cache.delete(name)) {
-                Storage.persist();
-            }
+            if (Storage.cache.delete(name)) Storage.persist();
         },
-
         isBlocked: (name) => {
             if (!name) return false;
             if (!Storage.initialized) Storage.init();
             return Storage.cache.has(name.trim());
         },
-
-        persist: () => {
-            GM_setValue(CONFIG.STORAGE_KEY, Array.from(Storage.cache));
-        },
-
-        // --- 新增：导入逻辑 ---
+        persist: () => { GM_setValue(CONFIG.STORAGE_KEY, Array.from(Storage.cache)); },
         importData: (jsonString) => {
             try {
                 const list = JSON.parse(jsonString);
@@ -119,108 +99,61 @@
                     list.forEach(item => {
                         if (item && typeof item === 'string') {
                             const t = item.trim();
-                            if (t && !Storage.cache.has(t)) {
-                                Storage.cache.add(t);
-                                count++;
-                            }
+                            if (t && !Storage.cache.has(t)) { Storage.cache.add(t); count++; }
                         }
                     });
                     Storage.persist();
-                    alert(`导入成功！新增了 ${count} 条数据，当前共 ${Storage.cache.size} 条。`);
-                    Core.refresh(); // 刷新页面显示
-                } else {
-                    alert('文件格式错误：必须是 JSON 数组');
-                }
-            } catch (e) {
-                alert('文件解析失败，请检查文件是否为标准 JSON 格式。');
-                console.error(e);
-            }
+                    alert(`导入成功！新增 ${count} 条，共 ${Storage.cache.size} 条。`);
+                    Core.refresh();
+                } else { alert('格式错误：必须是 JSON 数组'); }
+            } catch (e) { alert('解析失败'); console.error(e); }
         }
     };
 
-    // --- 4. UI Module ---
+    // --- 4. UI 模块 ---
     const UI = {
         injectStyles: () => {
             const styles = `
-                /* Action Bar */
-                .boss-action-bar {
-                    position: absolute; top: 0; right: 0; z-index: 999;
-                    display: none; border-bottom-left-radius: 8px; overflow: hidden;
-                    box-shadow: -2px 2px 8px rgba(0,0,0,0.15); background: white;
-                }
+                .boss-action-bar { position: absolute; top: 0; right: 0; z-index: 999; display: none; border-bottom-left-radius: 8px; overflow: hidden; box-shadow: -2px 2px 8px rgba(0,0,0,0.15); background: white; }
                 ${currentSiteConfig.cardSelectors.map(s => `${s}:hover .boss-action-bar`).join(', ')} { display: flex !important; }
                 .job-card-body:hover .boss-action-bar { display: flex !important; }
-
-                .boss-action-btn {
-                    padding: 6px 14px; font-size: 13px; cursor: pointer;
-                    font-weight: bold; font-family: sans-serif; color: white;
-                    display: flex; align-items: center; justify-content: center;
-                }
+                .boss-action-btn { padding: 6px 14px; font-size: 13px; cursor: pointer; font-weight: bold; color: white; display: flex; align-items: center; justify-content: center; }
                 .boss-btn-apply { background: #00bebd; border-right: 1px solid rgba(255,255,255,0.2); }
                 .boss-btn-apply:hover { background: #00a5a4; }
                 .boss-btn-block { background: #ff4d4f; }
                 .boss-btn-block:hover { background: #d9363e; }
-
-                /* States */
                 .boss-applied { background-color: #f0f9eb !important; opacity: 0.8; border-left: 4px solid #67c23a; }
-                .boss-btn-applied { background: #67c23a !important; cursor: default; pointer-events: none; }
+
+                /* 彻底隐藏 */
                 .universal-blocked { display: none !important; }
 
-                /* FAB */
-                #universal-helper-fab {
-                    position: fixed; bottom: 100px; right: 30px; width: 48px; height: 48px;
-                    background: #4285f4; color: white; border-radius: 50%;
-                    display: flex; align-items: center; justify-content: center;
-                    cursor: pointer; z-index: ${CONFIG.UI_Z_INDEX}; font-size: 22px;
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: 0.2s;
-                }
+                #universal-helper-fab { position: fixed; bottom: 100px; right: 30px; width: 48px; height: 48px; background: #4285f4; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: ${CONFIG.UI_Z_INDEX}; font-size: 22px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: 0.2s; }
                 #universal-helper-fab:hover { transform: scale(1.1); }
-
-                /* Panel */
-                #universal-panel {
-                    position: fixed; bottom: 160px; right: 30px; width: 320px;
-                    max-height: 600px; background: white; border: 1px solid #ddd;
-                    box-shadow: 0 8px 30px rgba(0,0,0,0.15); z-index: ${CONFIG.UI_Z_INDEX};
-                    border-radius: 12px; display: none; flex-direction: column;
-                    font-family: sans-serif; font-size: 14px;
-                }
+                #universal-panel { position: fixed; bottom: 160px; right: 30px; width: 320px; max-height: 600px; background: white; border: 1px solid #ddd; box-shadow: 0 8px 30px rgba(0,0,0,0.15); z-index: ${CONFIG.UI_Z_INDEX}; border-radius: 12px; display: none; flex-direction: column; font-family: sans-serif; font-size: 14px; }
                 .u-header { padding: 16px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; font-weight: bold; background: #f9f9f9; }
                 .u-content { flex: 1; overflow-y: auto; padding: 0; }
                 .u-section { padding: 16px; border-bottom: 8px solid #f5f5f5; text-align:center;}
-                .u-batch-btn {
-                    width: 100%; padding: 10px; background: #ff4d4f; color: white;
-                    border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: bold;
-                    margin-bottom: 10px; transition: background 0.2s;
-                }
-                .u-batch-btn:hover { background: #d9363e; }
-                .u-batch-btn.running { background: #ccc; cursor: not-allowed; }
-
-                .u-data-btn {
-                     width: 48%; padding: 8px; font-size: 12px; cursor: pointer;
-                     border: 1px solid #ddd; background: #fff; border-radius: 4px;
-                     margin-top: 5px;
-                }
+                .u-data-btn { width: 48%; padding: 8px; font-size: 12px; cursor: pointer; border: 1px solid #ddd; background: #fff; border-radius: 4px; margin-top: 5px; }
                 .u-data-btn:hover { background: #f0f0f0; }
-
                 .u-list-header { padding: 10px 16px; background: #f5f5f5; color: #666; font-size: 12px;}
                 .u-item { padding: 10px 16px; border-bottom: 1px solid #f1f3f4; display: flex; justify-content: space-between; }
                 .u-remove { color: #ff4d4f; cursor: pointer; }
 
-                /* Progress Overlay */
-                #batch-progress-overlay {
-                    position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
-                    background: rgba(0,0,0,0.8); color: white; padding: 10px 20px;
-                    border-radius: 30px; z-index: ${CONFIG.UI_Z_INDEX + 1};
-                    display: none; align-items: center; font-size: 14px;
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-                }
-                .spinner {
-                    width: 16px; height: 16px; border: 2px solid #fff; border-top-color: transparent;
-                    border-radius: 50%; animation: spin 1s linear infinite; margin-right: 10px;
-                }
-                @keyframes spin { to { transform: rotate(360deg); } }
+                #auto-load-toast { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); color: #fff; padding: 8px 16px; border-radius: 20px; font-size: 12px; z-index: ${CONFIG.UI_Z_INDEX}; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
+                #auto-load-toast.show { opacity: 1; }
 
-                body[data-site="51job"] #universal-helper-fab { background: #ff6000; }
+                /* 底部诱饵样式 */
+                .u-scroll-bait {
+                    width: 100%;
+                    height: 1000px; /* 撑开高度 */
+                    background: transparent;
+                    display: flex;
+                    align-items: flex-end;
+                    justify-content: center;
+                    padding-bottom: 20px;
+                    color: #999;
+                    font-size: 12px;
+                }
             `;
             if (typeof GM_addStyle !== 'undefined') GM_addStyle(styles);
             else {
@@ -233,7 +166,7 @@
         init: () => {
             UI.createFab();
             UI.createPanel();
-            UI.createProgressOverlay();
+            UI.createAutoLoadToast();
         },
         createFab: () => {
             const fab = document.createElement('div');
@@ -242,23 +175,33 @@
             fab.onclick = () => UI.togglePanel();
             document.body.appendChild(fab);
         },
+        createAutoLoadToast: () => {
+            const toast = document.createElement('div');
+            toast.id = 'auto-load-toast';
+            toast.innerText = '';
+            document.body.appendChild(toast);
+        },
+        showToast: (text, duration = 2000) => {
+            const t = document.getElementById('auto-load-toast');
+            if(t) {
+                t.innerText = text;
+                t.classList.add('show');
+                setTimeout(() => t.classList.remove('show'), duration);
+            }
+        },
+        hideToast: () => {
+             const t = document.getElementById('auto-load-toast');
+             if(t) t.classList.remove('show');
+        },
         createPanel: () => {
             const panel = document.createElement('div');
             panel.id = 'universal-panel';
             panel.innerHTML = `
                 <div class="u-header">
-                    <span>全能助手 v25</span>
+                    <span>全能助手 v33.0</span>
                     <span style="cursor:pointer" onclick="this.parentElement.parentElement.style.display='none'">×</span>
                 </div>
                 <div class="u-content">
-                    ${currentSiteConfig.key === 'boss' ?
-                    `<div class="u-section">
-                        <button id="u-batch-run" class="u-batch-btn">一键投递并屏蔽本页</button>
-                        <div style="font-size:12px;color:#999">
-                            <span style="color:orange">⚠ 保持浏览器前台运行</span>
-                        </div>
-                    </div>` : ''}
-
                     <div class="u-section" style="border-bottom: 8px solid #f5f5f5;">
                         <div style="display:flex; justify-content:space-between;">
                              <button id="u-btn-export" class="u-data-btn">📤 导出备份</button>
@@ -267,27 +210,11 @@
                         </div>
                          <div style="font-size:12px;color:#999;margin-top:5px">支持跨电脑迁移数据</div>
                     </div>
-
                     <div class="u-list-header">🚫 已屏蔽 (<span id="u-count">0</span>) - 最近50条</div>
                     <div id="u-list"></div>
                 </div>`;
             document.body.appendChild(panel);
 
-            // 绑定事件
-            const batchBtn = document.getElementById('u-batch-run');
-            if (batchBtn) {
-                batchBtn.onclick = () => {
-                    if (State.isBatchRunning) {
-                        Automation.stopBatch();
-                    } else {
-                        if (confirm('确定要对本页所有职位进行【投递+屏蔽】操作吗？')) {
-                            Automation.runBatch();
-                        }
-                    }
-                };
-            }
-
-            // 导出逻辑
             document.getElementById('u-btn-export').onclick = () => {
                 const data = Storage.getBlacklist();
                 const blob = new Blob([JSON.stringify(data)], {type: "application/json"});
@@ -299,7 +226,6 @@
                 URL.revokeObjectURL(url);
             };
 
-            // 导入逻辑
             document.getElementById('u-btn-import').onclick = () => {
                 document.getElementById('u-file-input').click();
             };
@@ -309,28 +235,10 @@
                 const reader = new FileReader();
                 reader.onload = (event) => {
                     Storage.importData(event.target.result);
-                    e.target.value = ''; // 重置，允许重复导入同名文件
+                    e.target.value = '';
                 };
                 reader.readAsText(file);
             };
-        },
-        createProgressOverlay: () => {
-            const div = document.createElement('div');
-            div.id = 'batch-progress-overlay';
-            div.innerHTML = `<div class="spinner"></div><span id="batch-status-text">正在处理...</span>`;
-            document.body.appendChild(div);
-        },
-        updateProgress: (current, total, statusText) => {
-            const overlay = document.getElementById('batch-progress-overlay');
-            const text = document.getElementById('batch-status-text');
-            if (overlay && text) {
-                overlay.style.display = 'flex';
-                text.innerText = `正在处理: ${current}/${total} - ${statusText}`;
-            }
-        },
-        hideProgress: () => {
-            const overlay = document.getElementById('batch-progress-overlay');
-            if (overlay) overlay.style.display = 'none';
         },
         togglePanel: () => {
             const panel = document.getElementById('universal-panel');
@@ -360,165 +268,104 @@
         }
     };
 
-    // --- 5. Automation Module ---
-    const Automation = {
-        setNativeValue: (element, value) => {
-            const valueSetter = Object.getOwnPropertyDescriptor(element, 'value').set;
-            const prototype = Object.getPrototypeOf(element);
-            const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, 'value').set;
-            if (valueSetter && valueSetter !== prototypeValueSetter) {
-                prototypeValueSetter.call(element, value);
+    // --- 5. 核心加载模块 ---
+    const Loader = {
+        triggerTrueReflow: () => {
+            document.body.style.borderBottom = '1px solid transparent';
+            void document.body.offsetHeight;
+            setTimeout(() => {
+                document.body.style.borderBottom = 'none';
+                window.dispatchEvent(new Event('resize'));
+            }, 50);
+        },
+
+        triggerGlobalScroll: () => {
+            const targets = [
+                window,
+                document.documentElement,
+                document.body,
+                document.querySelector(currentSiteConfig.scrollContainerSelector)
+            ];
+
+            targets.forEach(target => {
+                if (!target) return;
+                const isWindow = target === window;
+                const scrollHeight = isWindow ? document.documentElement.scrollHeight : target.scrollHeight;
+
+                const upPos = scrollHeight - 200;
+                if (isWindow) target.scrollTo(0, upPos); else target.scrollTop = upPos;
+
+                setTimeout(() => {
+                    if (isWindow) target.scrollTo(0, scrollHeight); else target.scrollTop = scrollHeight;
+                    const event = new Event('scroll');
+                    (isWindow ? window : target).dispatchEvent(event);
+                }, 100);
+            });
+        },
+
+        checkAndLoad: () => {
+            if (State.isAutoLoading || State.hasReachedLimit) return;
+
+            const allCards = document.querySelectorAll(currentSiteConfig.cardSelectors.join(','));
+            if (allCards.length === 0) return;
+
+            // --- 智能限频逻辑 ---
+            if (allCards.length === State.lastCardCount) {
+                State.retryCount++;
+                // 如果超过3次，且职位数没变，说明到底了，或者加载不出，停止尝试
+                if (State.retryCount > CONFIG.MAX_RETRY) {
+                     State.hasReachedLimit = true;
+                     UI.showToast(`已尝试${CONFIG.MAX_RETRY}次加载未果，自动停止。`, 3000);
+                     return;
+                }
             } else {
-                valueSetter.call(element, value);
+                // 如果职位数增加了，说明加载成功，重置计数器
+                State.retryCount = 0;
+                State.lastCardCount = allCards.length;
+                State.hasReachedLimit = false;
             }
-            element.dispatchEvent(new Event('input', { bubbles: true }));
-        },
-        monitorDialog: () => {
-            if (currentSiteConfig.key !== 'boss') return;
-            const observer = new MutationObserver((mutations) => {
-                for (const m of mutations) {
-                    if (m.addedNodes.length > 0) {
-                        const dialog = document.querySelector(currentSiteConfig.dialogSelector);
-                        if (dialog && !dialog.classList.contains('greet-boss-dialog') && !dialog.dataset.bossHelperProcessed) {
-                            dialog.dataset.bossHelperProcessed = 'true';
-                            const textarea = dialog.querySelector(currentSiteConfig.dialogInputSelector);
-                            if (textarea) {
-                                setTimeout(() => {
-                                    Automation.setNativeValue(textarea, CONFIG.DEFAULT_GREETING);
-                                }, 100);
-                                setTimeout(() => {
-                                    const submitBtn = dialog.querySelector(currentSiteConfig.dialogSubmitSelector);
-                                    if (submitBtn) submitBtn.click();
-                                }, 300);
-                            }
-                        }
-                    }
+
+            let visibleCount = 0;
+            allCards.forEach(card => {
+                if (!card.classList.contains('universal-blocked') && card.offsetParent !== null) {
+                    visibleCount++;
                 }
             });
-            observer.observe(document.body, { childList: true, subtree: true });
 
-            setInterval(() => {
-                const sentDialog = document.querySelector(currentSiteConfig.sentDialogSelector);
-                if (sentDialog && getComputedStyle(sentDialog).display !== 'none') {
-                    // console.log('[BossHelper] 检测到已发送弹窗，正在关闭...');
-                    const cancelBtn = sentDialog.querySelector('.cancel-btn');
-                    const closeBtn = sentDialog.querySelector('.close');
-                    if (cancelBtn) cancelBtn.click();
-                    else if (closeBtn) closeBtn.click();
-                }
-            }, 500);
-        },
-        applyJob: (card) => {
-            return new Promise((resolve) => {
-                let chatBtn = null;
-                if (currentSiteConfig.chatBtnSelectors && currentSiteConfig.chatBtnSelectors.length > 0) {
-                     for (const s of currentSiteConfig.chatBtnSelectors) {
-                        chatBtn = card.querySelector(s);
-                        if (chatBtn) break;
-                    }
-                }
-                if (chatBtn) {
-                    chatBtn.click();
-                    Automation.markApplied(card);
-                    setTimeout(() => resolve(true), 800);
-                    return;
-                }
-                const clickTarget = card.querySelector('.job-info') || card;
-                clickTarget.click();
-                const startTime = Date.now();
-                const checkInterval = setInterval(() => {
-                    if (Date.now() - startTime > CONFIG.DETAIL_LOAD_TIMEOUT) {
-                        clearInterval(checkInterval);
-                        console.warn('[BossHelper] 等待详情页按钮超时');
-                        resolve(false);
-                        return;
-                    }
-                    const detailPanel = document.querySelector(currentSiteConfig.detailPanelSelector);
-                    if (detailPanel) {
-                        const detailBtn = detailPanel.querySelector(currentSiteConfig.detailSubmitSelector);
-                        if (detailBtn && detailBtn.offsetParent !== null) {
-                            const btnText = detailBtn.innerText;
-                            if (btnText.includes('沟通') || btnText.includes('Chat')) {
-                                clearInterval(checkInterval);
-                                detailBtn.click();
-                                Automation.markApplied(card);
-                                resolve(true);
-                                return;
-                            } else if (btnText.includes('继续') || btnText.includes('已')) {
-                                clearInterval(checkInterval);
-                                Automation.markApplied(card);
-                                resolve(true);
-                                return;
-                            }
-                        }
-                    }
-                }, 200);
-            });
-        },
-        markApplied: (card) => {
-            card.classList.add('boss-applied');
-            const btn = card.querySelector('.boss-btn-apply');
-            if (btn) {
-                btn.innerText = '✅';
-                btn.classList.add('boss-btn-applied');
-            }
-        },
-        runBatch: async () => {
-            if (State.isBatchRunning) return;
-            State.isBatchRunning = true;
-            State.stopBatchSignal = false;
-            const btn = document.getElementById('u-batch-run');
-            if(btn) { btn.innerText = '停止运行'; btn.classList.add('running'); }
+            if (visibleCount < CONFIG.MIN_VISIBLE_ITEMS) {
+                State.isAutoLoading = true;
+                // 显示当前尝试次数
+                UI.showToast(`正在强制加载 (${State.retryCount}/${CONFIG.MAX_RETRY})...`, 4000);
 
-            const selector = currentSiteConfig.cardSelectors.join(',');
-            const cards = Array.from(document.querySelectorAll(selector)).filter(card => {
-                return !card.classList.contains('universal-blocked') && !card.classList.contains('boss-applied');
-            });
+                let bait = document.getElementById('u-scroll-bait');
+                if (!bait) {
+                    bait = document.createElement('div');
+                    bait.id = 'u-scroll-bait';
+                    bait.className = 'u-scroll-bait';
+                    bait.innerText = '正在用力加载更多职位...';
 
-            State.totalCount = cards.length;
-            State.processedCount = 0;
-            if (cards.length === 0) {
-                alert('当前页面没有可处理的职位。');
-                Automation.finishBatch();
-                return;
-            }
-            for (let i = 0; i < cards.length; i++) {
-                if (State.stopBatchSignal) break;
-                State.processedCount++;
-                const card = cards[i];
-                const companyName = Core.getCompanyName(card);
-                if (companyName && Storage.isBlocked(companyName)) {
-                    UI.updateProgress(State.processedCount, State.totalCount, `跳过已屏蔽: ${companyName}`);
-                    Core.updateVisibility(card, Storage.getBlacklist());
-                    continue;
+                    const listContainer = document.querySelector(currentSiteConfig.listContainerSelector);
+                    if (listContainer) listContainer.appendChild(bait);
+                    else document.body.appendChild(bait);
                 }
-                card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                UI.updateProgress(State.processedCount, State.totalCount, `正在投递: ${companyName || '未知'}`);
-                await Automation.applyJob(card);
-                if (companyName) {
-                    Storage.addCompany(companyName);
-                    Core.updateVisibility(card, Storage.getBlacklist());
-                }
-                const waitTime = Math.floor(Math.random() * (CONFIG.BATCH_DELAY_MAX - CONFIG.BATCH_DELAY_MIN + 1)) + CONFIG.BATCH_DELAY_MIN;
-                await new Promise(r => setTimeout(r, waitTime));
+
+                setTimeout(() => {
+                    Loader.triggerTrueReflow();
+                    setTimeout(() => {
+                        Loader.triggerGlobalScroll();
+                    }, 200);
+
+                    setTimeout(() => {
+                        if(bait) bait.remove();
+                        State.isAutoLoading = false;
+                        UI.hideToast();
+                    }, 1500);
+                }, 100);
             }
-            Automation.finishBatch();
-        },
-        stopBatch: () => {
-            State.stopBatchSignal = true;
-            const btn = document.getElementById('u-batch-run');
-            if(btn) btn.innerText = '正在停止...';
-        },
-        finishBatch: () => {
-            State.isBatchRunning = false;
-            const btn = document.getElementById('u-batch-run');
-            if(btn) { btn.innerText = '一键投递并屏蔽本页'; btn.classList.remove('running'); }
-            UI.hideProgress();
-            UI.renderList();
         }
     };
 
-    // --- 6. Core Logic ---
+    // --- 6. 核心逻辑 ---
     const Core = {
         getCompanyName: (card) => {
             let companyName = '';
@@ -528,7 +375,7 @@
             }
             return companyName;
         },
-        processCard: (card, blacklist) => {
+        processCard: (card) => {
             if (card.dataset.uProcessed === 'true') {
                 Core.updateVisibility(card);
                 return;
@@ -545,16 +392,7 @@
             if (card.querySelector('.boss-action-bar')) return;
             const bar = document.createElement('div');
             bar.className = 'boss-action-bar';
-            if (currentSiteConfig.key === 'boss') {
-                const apply = document.createElement('div');
-                apply.className = 'boss-action-btn boss-btn-apply';
-                apply.innerText = '🚀 投递';
-                apply.onclick = (e) => {
-                    e.stopPropagation(); e.preventDefault();
-                    Automation.applyJob(card);
-                };
-                bar.appendChild(apply);
-            }
+
             const block = document.createElement('div');
             block.className = 'boss-action-btn boss-btn-block';
             block.innerText = '🚫 屏蔽';
@@ -577,6 +415,10 @@
         },
         refresh: () => {
             document.querySelectorAll(currentSiteConfig.cardSelectors.join(',')).forEach(c => Core.updateVisibility(c));
+            // 每次刷新完（例如刚屏蔽了一个），重置状态，允许尝试加载
+            State.hasReachedLimit = false;
+            State.retryCount = 0;
+            Loader.checkAndLoad();
         },
         initScanner: () => {
             Storage.init();
@@ -584,20 +426,33 @@
                 const selector = currentSiteConfig.cardSelectors.join(',');
                 document.querySelectorAll(selector).forEach(c => Core.processCard(c));
             };
-            new MutationObserver(run).observe(document.body, { childList: true, subtree: true });
+
+            const observer = new MutationObserver((mutations) => {
+                let shouldRun = false;
+                for(let m of mutations) {
+                    if (m.addedNodes.length > 0) {
+                        shouldRun = true;
+                        break;
+                    }
+                }
+                if(shouldRun) run();
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
+
             setInterval(run, CONFIG.REFRESH_INTERVAL_MS);
+            setInterval(Loader.checkAndLoad, CONFIG.CHECK_LOAD_INTERVAL);
+
             run();
         }
     };
 
-    // --- 7. Initialization ---
+    // --- 7. 初始化 ---
     const App = {
         init: () => {
-            console.log(`[BossHelper v25] Loaded (IO Enabled)`);
+            console.log(`[BossHelper v33.0] Loaded (Smart Limit: 3 Retries)`);
             UI.injectStyles();
             UI.init();
             Core.initScanner();
-            Automation.monitorDialog();
         }
     };
 
