@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name        招聘网站全能助手 (v33.0 智能限频版)
+// @name        招聘网站全能助手 (v33.2 完美双模版)
 // @namespace   http://tampermonkey.net/
-// @version     33.0
-// @description 修复Boss直聘加载问题。采用“组合拳”触发加载，但限制最多尝试3次，防止到底后无限空转。
+// @version     33.2
+// @description 全能招聘助手：为Boss直聘提供“自动加载+智能限频”功能，为前程无忧(51job)提供“屏蔽”功能。两套逻辑隔离，互不干扰。
 // @author      Gemini (Fixed by Google Expert)
 // @match       *://www.zhipin.com/*
 // @match       *://*.51job.com/*
@@ -21,44 +21,41 @@
     const CONFIG = {
         STORAGE_KEY: 'universal_job_blacklist',
         UI_Z_INDEX: 2147483647,
-        REFRESH_INTERVAL_MS: 500,
-        CHECK_LOAD_INTERVAL: 1500, // 每次尝试加载的间隔
-        MIN_VISIBLE_ITEMS: 3,      // 屏幕上少于3个职位时触发
-        MAX_RETRY: 3,              // 【核心修改】最大连续重试次数设为 3次
-        DEFAULT_GREETING: '你好，我对这个职位很感兴趣，希望能有机会聊聊。'
+        REFRESH_INTERVAL_MS: 500,  // 屏蔽扫描频率
+        CHECK_LOAD_INTERVAL: 1500, // Boss自动加载频率
+        MIN_VISIBLE_ITEMS: 1,      // 屏幕职位少于3个时触发加载
+        MAX_RETRY: 1,              // Boss最大连续重试次数
     };
 
+    // --- 站点特征配置 ---
     const SITE_CONFIGS = {
         boss: {
             cardSelectors: ['.job-card-box', '.job-card-wrapper', 'li.job-primary', '.job-list-ul > li', '.job-card-body'],
             nameSelectors: ['.boss-name', '.company-name a', '.company-name', '.job-company span.company-text', '.company-text h3'],
-            // 列表的直接父容器 (用于插入诱饵)
             listContainerSelector: '.job-list-container, .rec-job-list, .job-list-box',
-            // 潜在的滚动容器
             scrollContainerSelector: '.page-jobs-main',
             key: 'boss'
         },
         job51: {
+            // 51job 的卡片选择器
             cardSelectors: ['.joblist-item', '.j_joblist .e', '.el', '.job-list-item'],
             nameSelectors: ['.cname a', '.cname', '.t2 a', '.er a', '.company_name'],
-            chatBtnSelectors: [],
             key: '51job'
         }
     };
 
+    // 自动识别当前是哪个网站
     const currentSiteConfig = location.host.includes('zhipin.com') ? SITE_CONFIGS.boss : SITE_CONFIGS.job51;
 
     // --- 2. 状态管理 ---
     const State = {
-        isBatchRunning: false,
-        stopBatchSignal: false,
         isAutoLoading: false,
         retryCount: 0,        // 当前重试次数
         lastCardCount: 0,     // 上一次检查时的卡片总数
         hasReachedLimit: false // 是否已达到重试上限
     };
 
-    // --- 3. 存储模块 ---
+    // --- 3. 存储模块 (通用) ---
     const Storage = {
         cache: new Set(),
         initialized: false,
@@ -118,15 +115,13 @@
                 ${currentSiteConfig.cardSelectors.map(s => `${s}:hover .boss-action-bar`).join(', ')} { display: flex !important; }
                 .job-card-body:hover .boss-action-bar { display: flex !important; }
                 .boss-action-btn { padding: 6px 14px; font-size: 13px; cursor: pointer; font-weight: bold; color: white; display: flex; align-items: center; justify-content: center; }
-                .boss-btn-apply { background: #00bebd; border-right: 1px solid rgba(255,255,255,0.2); }
-                .boss-btn-apply:hover { background: #00a5a4; }
                 .boss-btn-block { background: #ff4d4f; }
                 .boss-btn-block:hover { background: #d9363e; }
-                .boss-applied { background-color: #f0f9eb !important; opacity: 0.8; border-left: 4px solid #67c23a; }
-
-                /* 彻底隐藏 */
+                
+                /* 彻底隐藏被屏蔽的卡片 */
                 .universal-blocked { display: none !important; }
 
+                /* 悬浮球 & 面板 */
                 #universal-helper-fab { position: fixed; bottom: 100px; right: 30px; width: 48px; height: 48px; background: #4285f4; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: ${CONFIG.UI_Z_INDEX}; font-size: 22px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: 0.2s; }
                 #universal-helper-fab:hover { transform: scale(1.1); }
                 #universal-panel { position: fixed; bottom: 160px; right: 30px; width: 320px; max-height: 600px; background: white; border: 1px solid #ddd; box-shadow: 0 8px 30px rgba(0,0,0,0.15); z-index: ${CONFIG.UI_Z_INDEX}; border-radius: 12px; display: none; flex-direction: column; font-family: sans-serif; font-size: 14px; }
@@ -139,10 +134,11 @@
                 .u-item { padding: 10px 16px; border-bottom: 1px solid #f1f3f4; display: flex; justify-content: space-between; }
                 .u-remove { color: #ff4d4f; cursor: pointer; }
 
+                /* Boss直聘自动加载提示 */
                 #auto-load-toast { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); color: #fff; padding: 8px 16px; border-radius: 20px; font-size: 12px; z-index: ${CONFIG.UI_Z_INDEX}; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
                 #auto-load-toast.show { opacity: 1; }
 
-                /* 底部诱饵样式 */
+                /* Boss直聘底部物理诱饵 */
                 .u-scroll-bait {
                     width: 100%;
                     height: 1000px; /* 撑开高度 */
@@ -161,7 +157,6 @@
                 s.innerText = styles;
                 document.head.appendChild(s);
             }
-            document.body.setAttribute('data-site', currentSiteConfig.key);
         },
         init: () => {
             UI.createFab();
@@ -198,7 +193,7 @@
             panel.id = 'universal-panel';
             panel.innerHTML = `
                 <div class="u-header">
-                    <span>全能助手 v33.0</span>
+                    <span>全能助手 v33.2</span>
                     <span style="cursor:pointer" onclick="this.parentElement.parentElement.style.display='none'">×</span>
                 </div>
                 <div class="u-content">
@@ -268,8 +263,9 @@
         }
     };
 
-    // --- 5. 核心加载模块 ---
+    // --- 5. 核心加载模块 (仅限 Boss) ---
     const Loader = {
+        // 触发重排，强制浏览器重新计算布局
         triggerTrueReflow: () => {
             document.body.style.borderBottom = '1px solid transparent';
             void document.body.offsetHeight;
@@ -279,6 +275,7 @@
             }, 50);
         },
 
+        // 暴力滚动逻辑
         triggerGlobalScroll: () => {
             const targets = [
                 window,
@@ -292,9 +289,11 @@
                 const isWindow = target === window;
                 const scrollHeight = isWindow ? document.documentElement.scrollHeight : target.scrollHeight;
 
+                // 先往上滚一点
                 const upPos = scrollHeight - 200;
                 if (isWindow) target.scrollTo(0, upPos); else target.scrollTop = upPos;
 
+                // 再迅速滚到底，并触发事件
                 setTimeout(() => {
                     if (isWindow) target.scrollTo(0, scrollHeight); else target.scrollTop = scrollHeight;
                     const event = new Event('scroll');
@@ -303,7 +302,11 @@
             });
         },
 
+        // 主检查函数
         checkAndLoad: () => {
+            // 【安全门】如果不是 Boss直聘，绝对不执行后续逻辑
+            if (currentSiteConfig.key !== 'boss') return;
+
             if (State.isAutoLoading || State.hasReachedLimit) return;
 
             const allCards = document.querySelectorAll(currentSiteConfig.cardSelectors.join(','));
@@ -312,19 +315,19 @@
             // --- 智能限频逻辑 ---
             if (allCards.length === State.lastCardCount) {
                 State.retryCount++;
-                // 如果超过3次，且职位数没变，说明到底了，或者加载不出，停止尝试
                 if (State.retryCount > CONFIG.MAX_RETRY) {
                      State.hasReachedLimit = true;
-                     UI.showToast(`已尝试${CONFIG.MAX_RETRY}次加载未果，自动停止。`, 3000);
+                     UI.showToast(`已尝试${CONFIG.MAX_RETRY}次加载未果，停止加载。`, 3000);
                      return;
                 }
             } else {
-                // 如果职位数增加了，说明加载成功，重置计数器
+                // 如果卡片数量增加了，重置计数器
                 State.retryCount = 0;
                 State.lastCardCount = allCards.length;
                 State.hasReachedLimit = false;
             }
 
+            // 计算屏幕上可见的非屏蔽卡片数量
             let visibleCount = 0;
             allCards.forEach(card => {
                 if (!card.classList.contains('universal-blocked') && card.offsetParent !== null) {
@@ -332,11 +335,12 @@
                 }
             });
 
+            // 只有当可见卡片太少时，才触发加载
             if (visibleCount < CONFIG.MIN_VISIBLE_ITEMS) {
                 State.isAutoLoading = true;
-                // 显示当前尝试次数
                 UI.showToast(`正在强制加载 (${State.retryCount}/${CONFIG.MAX_RETRY})...`, 4000);
 
+                // 插入物理诱饵，撑开页面高度
                 let bait = document.getElementById('u-scroll-bait');
                 if (!bait) {
                     bait = document.createElement('div');
@@ -349,6 +353,7 @@
                     else document.body.appendChild(bait);
                 }
 
+                // 组合拳：重排 -> 滚动 -> 清理
                 setTimeout(() => {
                     Loader.triggerTrueReflow();
                     setTimeout(() => {
@@ -365,7 +370,7 @@
         }
     };
 
-    // --- 6. 核心逻辑 ---
+    // --- 6. 核心逻辑 (业务层) ---
     const Core = {
         getCompanyName: (card) => {
             let companyName = '';
@@ -382,14 +387,18 @@
             }
             const companyName = Core.getCompanyName(card);
             if (!companyName) return;
+            
             card.dataset.companyName = companyName;
             Core.injectActionBar(card, companyName);
             Core.updateVisibility(card);
             card.dataset.uProcessed = 'true';
         },
         injectActionBar: (card, name) => {
+            // 确保父元素有定位属性，以便按钮绝对定位
             if (window.getComputedStyle(card).position === 'static') card.style.position = 'relative';
+            
             if (card.querySelector('.boss-action-bar')) return;
+            
             const bar = document.createElement('div');
             bar.className = 'boss-action-bar';
 
@@ -400,7 +409,7 @@
                 e.stopPropagation(); e.preventDefault();
                 if (confirm(`屏蔽【${name}】?`)) {
                     Storage.addCompany(name);
-                    Core.refresh();
+                    Core.refresh(); // 触发刷新
                 }
             };
             bar.appendChild(block);
@@ -414,19 +423,27 @@
             }
         },
         refresh: () => {
+            // 1. 刷新所有卡片的显示/隐藏状态
             document.querySelectorAll(currentSiteConfig.cardSelectors.join(',')).forEach(c => Core.updateVisibility(c));
-            // 每次刷新完（例如刚屏蔽了一个），重置状态，允许尝试加载
-            State.hasReachedLimit = false;
-            State.retryCount = 0;
-            Loader.checkAndLoad();
+            
+            // 2. 仅在 Boss直聘 上触发加载逻辑
+            if (currentSiteConfig.key === 'boss') {
+                // 屏蔽了卡片后，屏幕空了，需要重置状态并尝试加载新数据
+                State.hasReachedLimit = false; 
+                State.retryCount = 0;
+                Loader.checkAndLoad();
+            }
         },
         initScanner: () => {
             Storage.init();
+            
+            // 扫描器：负责处理新出现的卡片
             const run = () => {
                 const selector = currentSiteConfig.cardSelectors.join(',');
                 document.querySelectorAll(selector).forEach(c => Core.processCard(c));
             };
 
+            // DOM 监听：监听网页内容变化
             const observer = new MutationObserver((mutations) => {
                 let shouldRun = false;
                 for(let m of mutations) {
@@ -439,8 +456,13 @@
             });
             observer.observe(document.body, { childList: true, subtree: true });
 
+            // 兜底定时器：定期扫描，防止漏网之鱼
             setInterval(run, CONFIG.REFRESH_INTERVAL_MS);
-            setInterval(Loader.checkAndLoad, CONFIG.CHECK_LOAD_INTERVAL);
+
+            // 【关键修改】仅 Boss直聘 启动自动加载定时器
+            if (currentSiteConfig.key === 'boss') {
+                setInterval(Loader.checkAndLoad, CONFIG.CHECK_LOAD_INTERVAL);
+            }
 
             run();
         }
@@ -449,7 +471,7 @@
     // --- 7. 初始化 ---
     const App = {
         init: () => {
-            console.log(`[BossHelper v33.0] Loaded (Smart Limit: 3 Retries)`);
+            console.log(`[JobHelper v33.2] Loaded. Site: ${currentSiteConfig.key}`);
             UI.injectStyles();
             UI.init();
             Core.initScanner();
