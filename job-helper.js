@@ -24,7 +24,7 @@
         REFRESH_INTERVAL_MS: 500,  // 屏蔽扫描频率
         CHECK_LOAD_INTERVAL: 1500, // Boss自动加载频率
         MIN_VISIBLE_ITEMS: 3,      // 屏幕职位少于3个时触发加载
-        MAX_RETRY: 3,              // Boss最大连续重试次数
+        MAX_RETRY: 3,              // Boss最大连续重试次数-2
     };
 
     // --- 站点特征配置 ---
@@ -317,7 +317,7 @@
                 State.retryCount++;
                 if (State.retryCount > CONFIG.MAX_RETRY) {
                      State.hasReachedLimit = true;
-                     UI.showToast(`已尝试${CONFIG.MAX_RETRY}次加载未果，停止加载。`, 3000);
+                     UI.showToast(`已尝试${CONFIG.MAX_RETRY+2}次加载未果，停止加载。`, 3000);
                      return;
                 }
             } else {
@@ -338,7 +338,7 @@
             // 只有当可见卡片太少时，才触发加载
             if (visibleCount < CONFIG.MIN_VISIBLE_ITEMS) {
                 State.isAutoLoading = true;
-                UI.showToast(`正在强制加载 (${State.retryCount}/${CONFIG.MAX_RETRY})...`, 4000);
+                // UI.showToast(`正在强制加载 (${State.retryCount}/${CONFIG.MAX_RETRY})...`, 4000);
 
                 // 插入物理诱饵，撑开页面高度
                 let bait = document.getElementById('u-scroll-bait');
