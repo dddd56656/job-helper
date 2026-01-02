@@ -23,8 +23,8 @@
         UI_Z_INDEX: 2147483647,
         REFRESH_INTERVAL_MS: 500,  // 屏蔽扫描频率
         CHECK_LOAD_INTERVAL: 1500, // Boss自动加载频率
-        MIN_VISIBLE_ITEMS: 1,      // 屏幕职位少于3个时触发加载
-        MAX_RETRY: 1,              // Boss最大连续重试次数
+        MIN_VISIBLE_ITEMS: 3,      // 屏幕职位少于3个时触发加载
+        MAX_RETRY: 3,              // Boss最大连续重试次数
     };
 
     // --- 站点特征配置 ---
