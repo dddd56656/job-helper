@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name        招聘网站全能助手 (v33.3 不死鸟修复版)
+// @name        招聘网站全能助手 (v33.5 不死版)
 // @namespace   http://tampermonkey.net/
-// @version     33.3
-// @description 全能招聘助手：修复Boss直聘在强屏蔽模式下“死锁”无法加载新职位的问题，增加“不死鸟”逻辑。
+// @version     33.5
+// @description 全能招聘助手：集成了“自动加载”、“屏蔽黑名单”、“暂停控制”以及最新的“僵死自动刷新”功能。
 // @author      Gemini (Fixed by Google Expert)
 // @match       *://www.zhipin.com/*
 // @match       *://*.51job.com/*
@@ -17,14 +17,15 @@
 (function() {
     'use strict';
 
-    // --- 1. 配置参数 (专家调整版) ---
+    // --- 1. 配置参数 ---
     const CONFIG = {
         STORAGE_KEY: 'universal_job_blacklist',
         UI_Z_INDEX: 2147483647,
-        REFRESH_INTERVAL_MS: 500,  // 屏蔽扫描频率
-        CHECK_LOAD_INTERVAL: 1200, // 加快检查频率 (原1500)
-        MIN_VISIBLE_ITEMS: 4,      // 屏幕可见职位少于4个时触发加载
-        MAX_RETRY: 10,             // 大幅提升重试容错 (原3)
+        REFRESH_INTERVAL_MS: 500,
+        CHECK_LOAD_INTERVAL: 1200,
+        MIN_VISIBLE_ITEMS: 4,
+        MAX_RETRY: 10,             // 常规重试上限
+        AUTO_REFRESH_LIMIT: 15,    // 【新增】僵死判定阈值：连续15次加载失败触发刷新
     };
 
     // --- 站点特征配置 ---
@@ -33,7 +34,7 @@
             cardSelectors: ['.job-card-box', '.job-card-wrapper', 'li.job-primary', '.job-list-ul > li', '.job-card-body'],
             nameSelectors: ['.boss-name', '.company-name a', '.company-name', '.job-company span.company-text', '.company-text h3'],
             listContainerSelector: '.job-list-container, .rec-job-list, .job-list-box',
-            scrollContainerSelector: '.page-jobs-main', // Boss主要滚动区域
+            scrollContainerSelector: '.page-jobs-main',
             key: 'boss'
         },
         job51: {
@@ -48,13 +49,15 @@
     // --- 2. 状态管理 ---
     const State = {
         isAutoLoading: false,
+        isPaused: false,
         retryCount: 0,
         lastCardCount: 0,
         hasReachedLimit: false,
-        blockedCountSinceLoad: 0 // 统计本轮自动跳过了多少垃圾
+        blockedCountSinceLoad: 0,
+        reloadTimer: null // 刷新倒计时句柄
     };
 
-    // --- 3. 存储模块 (保持原样) ---
+    // --- 3. 存储模块 (通用) ---
     const Storage = {
         cache: new Set(),
         initialized: false,
@@ -106,7 +109,7 @@
         }
     };
 
-    // --- 4. UI 模块 (增加状态显示) ---
+    // --- 4. UI 模块 ---
     const UI = {
         injectStyles: () => {
             const styles = `
@@ -118,9 +121,12 @@
                 .boss-btn-block:hover { background: #d9363e; }
                 .universal-blocked { display: none !important; }
 
-                /* 悬浮球 & 面板 */
-                #universal-helper-fab { position: fixed; bottom: 100px; right: 30px; width: 48px; height: 48px; background: #4285f4; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: ${CONFIG.UI_Z_INDEX}; font-size: 22px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: 0.2s; }
+                /* 悬浮球 */
+                #universal-helper-fab { position: fixed; bottom: 100px; right: 30px; width: 48px; height: 48px; background: #4285f4; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: ${CONFIG.UI_Z_INDEX}; font-size: 22px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: 0.2s; user-select: none; }
                 #universal-helper-fab:hover { transform: scale(1.1); }
+                #universal-helper-fab.paused { background: #999; }
+
+                /* 面板 */
                 #universal-panel { position: fixed; bottom: 160px; right: 30px; width: 320px; max-height: 600px; background: white; border: 1px solid #ddd; box-shadow: 0 8px 30px rgba(0,0,0,0.15); z-index: ${CONFIG.UI_Z_INDEX}; border-radius: 12px; display: none; flex-direction: column; font-family: sans-serif; font-size: 14px; }
                 .u-header { padding: 16px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; font-weight: bold; background: #f9f9f9; }
                 .u-content { flex: 1; overflow-y: auto; padding: 0; }
@@ -131,12 +137,24 @@
                 .u-item { padding: 10px 16px; border-bottom: 1px solid #f1f3f4; display: flex; justify-content: space-between; }
                 .u-remove { color: #ff4d4f; cursor: pointer; }
 
-                /* 优化 Toast 样式 */
-                #auto-load-toast { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); color: #fff; padding: 10px 20px; border-radius: 30px; font-size: 13px; z-index: ${CONFIG.UI_Z_INDEX}; opacity: 0; transition: opacity 0.3s; pointer-events: none; font-weight: 500; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
-                #auto-load-toast.show { opacity: 1; }
-                .u-highlight { color: #4db8ff; font-weight: bold; }
+                /* 开关 */
+                #u-toggle-pause { width: 100%; padding: 10px; margin-bottom: 10px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; transition: 0.2s; color: white; }
+                .u-btn-running { background: #52c41a; }
+                .u-btn-running:hover { background: #73d13d; }
+                .u-btn-paused { background: #faad14; }
+                .u-btn-paused:hover { background: #ffc53d; }
 
-                /* 物理诱饵 - 隐形但在 */
+                /* 提示条 */
+                #auto-load-toast { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); color: #fff; padding: 10px 20px; border-radius: 30px; font-size: 13px; z-index: ${CONFIG.UI_Z_INDEX}; opacity: 0; transition: opacity 0.3s; cursor: pointer; font-weight: 500; box-shadow: 0 4px 12px rgba(0,0,0,0.2); display: flex; align-items: center; gap: 8px; }
+                #auto-load-toast.show { opacity: 1; }
+                #auto-load-toast:hover { background: rgba(255, 77, 79, 0.9); }
+                #auto-load-toast.danger { background: #f5222d; animation: pulse 1s infinite; } /* 危险红 */
+
+                @keyframes pulse { 0% { transform: translateX(-50%) scale(1); } 50% { transform: translateX(-50%) scale(1.05); } 100% { transform: translateX(-50%) scale(1); } }
+
+                .u-highlight { color: #4db8ff; font-weight: bold; }
+                .u-toast-hint { font-size: 10px; color: #ccc; margin-left: 5px; border-left: 1px solid #666; padding-left: 8px; }
+
                 .u-scroll-bait { width: 100%; height: 100px; opacity: 0; pointer-events: none; }
             `;
             if (typeof GM_addStyle !== 'undefined') GM_addStyle(styles);
@@ -158,48 +176,87 @@
             fab.onclick = () => UI.togglePanel();
             document.body.appendChild(fab);
         },
+        updateFabStatus: () => {
+            const fab = document.getElementById('universal-helper-fab');
+            if (State.isPaused) {
+                fab.classList.add('paused');
+                fab.innerText = '⏸️';
+                fab.title = "已暂停加载";
+            } else {
+                fab.classList.remove('paused');
+                fab.innerText = '🛡️';
+                fab.title = "运行中";
+            }
+        },
         createAutoLoadToast: () => {
             const toast = document.createElement('div');
             toast.id = 'auto-load-toast';
-            toast.innerText = '';
+            toast.title = "点击立即停止";
+            toast.onclick = () => {
+                // 如果正在倒计时刷新，取消刷新
+                if (State.reloadTimer) {
+                    clearTimeout(State.reloadTimer);
+                    State.reloadTimer = null;
+                    toast.classList.remove('danger');
+                    UI.showToast("🛡️ 已取消自动刷新，脚本已暂停", 3000);
+                    Core.togglePause(true);
+                } else {
+                    Core.togglePause(true);
+                    UI.showToast("🛑 已紧急停止加载", 2000);
+                }
+            };
             document.body.appendChild(toast);
         },
-        showToast: (text, duration = 2000) => {
+        showToast: (html, duration = 2000, isDanger = false) => {
             const t = document.getElementById('auto-load-toast');
             if(t) {
-                t.innerHTML = text; // 支持HTML
+                t.innerHTML = html;
                 t.classList.add('show');
-                // 清除之前的定时器，防止闪烁
+                if (isDanger) t.classList.add('danger');
+                else t.classList.remove('danger');
+
+                // 如果已经有定时器（非刷新定时器），清除它
                 if (t.dataset.timer) clearTimeout(t.dataset.timer);
-                t.dataset.timer = setTimeout(() => t.classList.remove('show'), duration);
+
+                // 只有非持久显示的Toast才自动消失
+                if (duration > 0) {
+                    t.dataset.timer = setTimeout(() => {
+                        t.classList.remove('show');
+                        t.classList.remove('danger');
+                    }, duration);
+                }
             }
         },
         hideToast: () => {
              const t = document.getElementById('auto-load-toast');
-             if(t) t.classList.remove('show');
+             if(t) {
+                 t.classList.remove('show');
+                 t.classList.remove('danger');
+             }
         },
         createPanel: () => {
             const panel = document.createElement('div');
             panel.id = 'universal-panel';
             panel.innerHTML = `
                 <div class="u-header">
-                    <span>全能助手 v33.3</span>
+                    <span>全能助手 v33.5</span>
                     <span style="cursor:pointer" onclick="this.parentElement.parentElement.style.display='none'">×</span>
                 </div>
                 <div class="u-content">
                     <div class="u-section">
-                        <div style="display:flex; justify-content:space-between;">
+                        <button id="u-toggle-pause" class="u-btn-running">🔄 自动加载：运行中</button>
+                        <div style="display:flex; justify-content:space-between; margin-top:10px;">
                              <button id="u-btn-export" class="u-data-btn">📤 导出备份</button>
                              <button id="u-btn-import" class="u-data-btn">📥 导入数据</button>
                              <input type="file" id="u-file-input" style="display:none" accept=".json">
                         </div>
-                         <div style="font-size:12px;color:#999;margin-top:5px">支持跨电脑迁移数据</div>
                     </div>
                     <div class="u-list-header">🚫 已屏蔽 (<span id="u-count">0</span>) - 最近50条</div>
                     <div id="u-list"></div>
                 </div>`;
             document.body.appendChild(panel);
 
+            document.getElementById('u-toggle-pause').onclick = () => Core.togglePause();
             document.getElementById('u-btn-export').onclick = () => {
                 const data = Storage.getBlacklist();
                 const blob = new Blob([JSON.stringify(data)], {type: "application/json"});
@@ -210,10 +267,7 @@
                 a.click();
                 URL.revokeObjectURL(url);
             };
-
-            document.getElementById('u-btn-import').onclick = () => {
-                document.getElementById('u-file-input').click();
-            };
+            document.getElementById('u-btn-import').onclick = () => { document.getElementById('u-file-input').click(); };
             document.getElementById('u-file-input').onchange = (e) => {
                 const file = e.target.files[0];
                 if (!file) return;
@@ -225,6 +279,17 @@
                 reader.readAsText(file);
             };
         },
+        updatePanelButton: () => {
+            const btn = document.getElementById('u-toggle-pause');
+            if (!btn) return;
+            if (State.isPaused) {
+                btn.className = 'u-btn-paused';
+                btn.innerText = '⏸️ 自动加载：已暂停';
+            } else {
+                btn.className = 'u-btn-running';
+                btn.innerText = '🔄 自动加载：运行中';
+            }
+        },
         togglePanel: () => {
             const panel = document.getElementById('universal-panel');
             if (panel.style.display === 'flex') {
@@ -232,6 +297,7 @@
             } else {
                 panel.style.display = 'flex';
                 UI.renderList();
+                UI.updatePanelButton();
             }
         },
         renderList: () => {
@@ -253,69 +319,53 @@
         }
     };
 
-    // --- 5. 核心加载模块 (Google Expert Fix) ---
+    // --- 5. 核心加载模块 ---
     const Loader = {
-        // 触发重排
         triggerTrueReflow: () => {
             document.body.style.borderBottom = '1px solid transparent';
-            void document.body.offsetHeight; // 强制计算
+            void document.body.offsetHeight;
             document.body.style.borderBottom = 'none';
         },
-
-        // 优化后的滚动逻辑：模拟“拉到底部”的操作
         triggerSmartScroll: () => {
             const targets = [
                 document.documentElement,
                 document.body,
                 document.querySelector(currentSiteConfig.scrollContainerSelector)
             ];
-
             targets.forEach(target => {
                 if (!target) return;
                 const isWindow = target === document.documentElement || target === document.body;
-
-                // 获取当前滚动高度
                 const currentScroll = isWindow ? window.scrollY : target.scrollTop;
                 const maxScroll = (isWindow ? document.body.scrollHeight : target.scrollHeight) - (isWindow ? window.innerHeight : target.clientHeight);
 
-                // 只有当还没到底部太远时，才执行操作
-                // 1. 先微向上一点，打破“静止”状态
                 if(isWindow) window.scrollTo(0, maxScroll - 50); else target.scrollTop = maxScroll - 50;
 
-                // 2. 延迟后猛力冲到底
                 setTimeout(() => {
                     if(isWindow) window.scrollTo(0, maxScroll + 500); else target.scrollTop = maxScroll + 500;
-
-                    // 3. 手动派发事件，欺骗React/Vue框架
                     const event = new Event('scroll', { bubbles: true });
                     (isWindow ? window : target).dispatchEvent(event);
                 }, 150);
             });
         },
-
-        // 主检查函数
         checkAndLoad: () => {
             if (currentSiteConfig.key !== 'boss') return;
-
-            // 如果正在加载中，跳过
+            if (State.isPaused) return;
             if (State.isAutoLoading) return;
+            // 如果正在准备刷新，也别加载了
+            if (State.reloadTimer) return;
 
             const allCards = document.querySelectorAll(currentSiteConfig.cardSelectors.join(','));
             if (allCards.length === 0) return;
 
-            // --- 智能限频与死锁解除 ---
             if (allCards.length === State.lastCardCount) {
                 State.retryCount++;
             } else {
-                // 如果卡片增加了，重置所有计数器
                 const newItems = allCards.length - State.lastCardCount;
                 State.retryCount = 0;
                 State.lastCardCount = allCards.length;
                 State.hasReachedLimit = false;
-                // UI.showToast(`已加载 ${newItems} 个新职位`, 1500);
             }
 
-            // 计算可见数量
             let visibleCount = 0;
             allCards.forEach(card => {
                 if (!card.classList.contains('universal-blocked') && card.offsetParent !== null) {
@@ -323,36 +373,39 @@
                 }
             });
 
-            // 【不死鸟逻辑】:
-            // 如果屏幕上全是屏蔽卡片(visibleCount == 0)，无论retryCount是多少，必须强制重置！
-            // 否则用户面对的就是白屏，且脚本已停止工作。
-            if (visibleCount === 0 && State.hasReachedLimit) {
-                console.log('[JobHelper] 全屏屏蔽，强制复活加载器...');
-                State.hasReachedLimit = false;
-                State.retryCount = 0; // 重置重试次数
+            // --- 僵死检测核心逻辑 ---
+            // 如果全被屏蔽(visibleCount=0) 且 尝试次数超过了常规限制
+            if (visibleCount === 0 && State.retryCount > CONFIG.MAX_RETRY) {
+                 // 检查是否达到了“刷新阈值”
+                 if (State.retryCount >= CONFIG.AUTO_REFRESH_LIMIT) {
+                     console.log('触发僵死保护，准备刷新页面...');
+                     UI.showToast(`⚠️ 页面似乎卡死，3秒后自动刷新... <span class="u-toast-hint">点击取消</span>`, 0, true);
+
+                     // 设置3秒倒计时刷新
+                     State.reloadTimer = setTimeout(() => {
+                         location.reload();
+                     }, 3000);
+                     return;
+                 }
+                 // 还没到刷新阈值，重置flag继续尝试（不死鸟逻辑）
+                 State.hasReachedLimit = false;
             }
 
-            // 检查是否达到重试上限 (仅在有可见内容时生效)
-            if (State.retryCount > CONFIG.MAX_RETRY) {
+            if (State.retryCount > CONFIG.MAX_RETRY && visibleCount > 0) {
                 if (!State.hasReachedLimit) {
                     State.hasReachedLimit = true;
-                    UI.showToast(`已到底部或网络卡顿，停止自动加载`, 3000);
+                    UI.showToast(`已到底部，停止自动加载`, 3000);
                 }
                 return;
             }
 
-            // 触发加载条件
             if (visibleCount < CONFIG.MIN_VISIBLE_ITEMS) {
                 State.isAutoLoading = true;
 
-                // 动态提示：如果是由于屏蔽导致的加载，提示用户
                 if (visibleCount === 0) {
-                    UI.showToast(`🗑️ 当前页全被屏蔽，正在自动翻页... <span class="u-highlight">(${State.retryCount + 1})</span>`, 9000); // 长时间显示直到加载成功
-                } else {
-                    // UI.showToast(`正在加载更多...`, 1000);
+                    UI.showToast(`🗑️ 全屏垃圾清理中... <span class="u-highlight">(${State.retryCount}/${CONFIG.AUTO_REFRESH_LIMIT})</span>`, 5000);
                 }
 
-                // 插入物理诱饵
                 let bait = document.getElementById('u-scroll-bait');
                 if (!bait) {
                     bait = document.createElement('div');
@@ -363,23 +416,36 @@
                     else document.body.appendChild(bait);
                 }
 
-                // 执行滚动
                 setTimeout(() => {
                     Loader.triggerTrueReflow();
                     Loader.triggerSmartScroll();
-
-                    // 1.2秒后解除锁定，允许下一次检查
                     setTimeout(() => {
                         State.isAutoLoading = false;
-                        if (visibleCount > 0) UI.hideToast(); // 如果有内容了就隐藏提示
+                        if (visibleCount > 0) UI.hideToast();
                     }, 1200);
                 }, 100);
             }
         }
     };
 
-    // --- 6. 核心逻辑 (业务层) ---
+    // --- 6. 核心逻辑 ---
     const Core = {
+        togglePause: (forcePause = false) => {
+            if (forcePause) {
+                State.isPaused = true;
+            } else {
+                State.isPaused = !State.isPaused;
+            }
+            UI.updateFabStatus();
+            UI.updatePanelButton();
+            if (State.isPaused) {
+                State.isAutoLoading = false;
+                UI.showToast("⏸️ 自动加载已暂停", 2000);
+            } else {
+                UI.showToast("▶️ 自动加载已恢复", 2000);
+                Loader.checkAndLoad();
+            }
+        },
         getCompanyName: (card) => {
             let companyName = '';
             for (let s of currentSiteConfig.nameSelectors) {
@@ -457,19 +523,16 @@
 
             setInterval(run, CONFIG.REFRESH_INTERVAL_MS);
 
-            // 仅 Boss 直聘启动自动加载
             if (currentSiteConfig.key === 'boss') {
-                console.log('[JobHelper] Boss直聘自动加载模块已启动');
                 setInterval(Loader.checkAndLoad, CONFIG.CHECK_LOAD_INTERVAL);
             }
             run();
         }
     };
 
-    // --- 7. 初始化 ---
     const App = {
         init: () => {
-            console.log(`[JobHelper v33.3] Loaded. Site: ${currentSiteConfig.key}`);
+            console.log(`[JobHelper v33.5] Loaded. Site: ${currentSiteConfig.key}`);
             UI.injectStyles();
             UI.init();
             Core.initScanner();
