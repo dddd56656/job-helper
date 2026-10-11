@@ -1,0 +1,5 @@
+# Worktrees for parallel multi-terminal development
+worktrees/
+
+# Reference cloned repositories for Codebase Memory
+workspace/reference/
