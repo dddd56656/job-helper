@@ -1,9 +1,9 @@
 /**
  * Blacklist Engine (src/core/blacklist.js)
- * 
+ *
  * High-performance, O(1) in-memory Set cache backed by GM_getValue / GM_setValue persistence.
  * Provides pre-flight fast filtering to achieve "zero network request skipping" for blacklisted employers.
- * 
+ *
  * Upgraded from original job-helper Storage module with backward compatibility.
  */
 
@@ -210,9 +210,9 @@ class BlacklistEngine {
     /**
      * High-throughput pre-flight batch filter.
      * Segregates jobs into allowed and blocked lists without any network calls.
-     * 
+     *
      * Supports job objects with `companyName`, `brandName`, `company`, or raw string company names.
-     * 
+     *
      * @param {Array<Object|string>} jobs
      * @param {Object} [options]
      * @param {boolean} [options.fuzzy]

@@ -1,6 +1,6 @@
 /**
  * Test Suite: Blacklist Engine & Adaptive Rate Limiter (tests/blacklist_rate_test.js)
- * 
+ *
  * Verifies:
  * 1. BlacklistEngine: Set cache, O(1) sync check, fuzzy matching, GM/mock persistence,
  *    zero-network batch filtering with high throughput.

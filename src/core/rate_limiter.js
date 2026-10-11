@@ -1,6 +1,6 @@
 /**
  * Adaptive Rate Limiter & Jittered Delay (src/core/rate_limiter.js)
- * 
+ *
  * Provides human-like timing variations using Box-Muller Gaussian jitter.
  * Extracted and standardized from boss-helper anti-ban guidelines:
  *  - Single delivery interval: 2,000ms ~ 5,000ms (Gaussian mean ~3,500ms)
@@ -52,7 +52,7 @@ function gaussianRandom(mean = 0, stdDev = 1) {
 /**
  * Calculate jittered delay within [minMs, maxMs] using Gaussian perturbation
  * (3-sigma rule: ~99.73% of values naturally fall into [minMs, maxMs])
- * 
+ *
  * @param {number} minMs - Minimum milliseconds
  * @param {number} maxMs - Maximum milliseconds
  * @returns {number} Clamped integer milliseconds
@@ -68,7 +68,7 @@ function calculateGaussianJitter(minMs, maxMs) {
 /**
  * High-precision jittered sleep function with Gaussian perturbation
  * Supports cancellation via AbortSignal or custom isStopped predicate.
- * 
+ *
  * @param {number} minMs - Minimum delay in milliseconds
  * @param {number} maxMs - Maximum delay in milliseconds
  * @param {Object} [options]
@@ -192,7 +192,7 @@ class AdaptiveRateLimiter {
     /**
      * Call after each delivery action.
      * Automatically triggers 30s batch rest every 10 deliveries, or standard 2~5s interval.
-     * 
+     *
      * @param {Object} [options]
      * @param {Function} [options.onBatchRest] - Callback when entering batch rest (count, durationMs)
      * @param {AbortSignal} [options.signal]

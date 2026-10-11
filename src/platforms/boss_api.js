@@ -474,3 +474,21 @@ export async function batchDeliverJobs(jobs, options = {}) {
  * 批量投递兼容别名导出
  */
 export const deliverBatch = batchDeliverJobs;
+
+// Browser entry point used by the production userscript bundle.  Keeping this
+// explicit also lets the scheduler receive the API as a dependency in tests.
+if (typeof window !== 'undefined') {
+  window.BossApi = {
+    BossApiError,
+    PublishError,
+    QuotaLimitError,
+    RateLimitError,
+    BOSS_ENDPOINTS,
+    extractBstToken,
+    confirmChatRemindLimit,
+    sendPublishReq,
+    deliverJob,
+    batchDeliverJobs,
+    deliverBatch,
+  };
+}
