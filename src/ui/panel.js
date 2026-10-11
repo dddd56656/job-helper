@@ -24,7 +24,7 @@ class DeliveryPanel {
     render(view) {
         if (!this.element) return;
         const { stats, state, dailyLimit } = view;
-        this.element.querySelector('[data-role="stats"]').innerHTML = `状态：${state}<br>已投递：${stats.delivered}<br>黑名单跳过：${stats.blacklistSkipped}<br>当前页：${stats.page || '-'}<br>限额：${stats.delivered}/${dailyLimit}${stats.limitReached ? '（已达）' : ''}`;
+        this.element.querySelector('[data-role="stats"]').innerHTML = `状态：${state}<br>已投递：${stats.delivered}<br>黑名单跳过：${stats.blacklistSkipped}<br>重复跳过：${stats.duplicateSkipped}<br>当前页：${stats.page || '-'}<br>限额：${stats.delivered}/${dailyLimit}${stats.limitReached ? '（已达）' : ''}`;
         this.element.querySelector('[data-role="limit"]').value = dailyLimit;
         this.element.querySelector('[data-action="toggle"]').textContent = state === 'running' ? '暂停' : '开始';
     }

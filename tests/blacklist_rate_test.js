@@ -94,6 +94,16 @@ async function runAllTests() {
         assert.strictEqual(engine.isBlocked('蚂蚁集团', { fuzzy: true }), false);
     });
 
+    await test('Company names are normalized and brand identifiers are supported', () => {
+        const engine = new BlacklistEngine({ storageKey: 'test_blacklist_normalized' });
+        engine.clear();
+        engine.addCompany(' Example  Corp ');
+        engine.addCompany('brand_123');
+        assert.strictEqual(engine.isBlocked('example corp'), true);
+        const result = engine.batchFilter([{ companyName: 'other', encryptBrandId: 'brand_123' }]);
+        assert.strictEqual(result.blocked.length, 1);
+    });
+
     await test('Import and Export data functionality', () => {
         const engine = new BlacklistEngine({ storageKey: 'test_import' });
         engine.clear();

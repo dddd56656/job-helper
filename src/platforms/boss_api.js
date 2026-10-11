@@ -54,12 +54,25 @@ export class RateLimitError extends BossApiError {
   }
 }
 
+export class AuthenticationError extends BossApiError {
+  constructor(message, options) {
+    super(message, options);
+    this.name = 'AuthenticationError';
+  }
+}
+
+export class VerificationError extends BossApiError {
+  constructor(message, options) {
+    super(message, options);
+    this.name = 'VerificationError';
+  }
+}
+
 /**
  * BOSS直聘相关 API 端点
  */
 export const BOSS_ENDPOINTS = {
   FRIEND_ADD: 'https://www.zhipin.com/wapi/zpgeek/friend/add.json',
-  CHAT_REMIND: 'https://www.zhipin.com/wapi/zpCommon/actionLog/geek/chatremind.json',
 };
 
 /**
@@ -99,33 +112,6 @@ export function extractBstToken(explicitToken) {
 }
 
 /**
- * 向 actionLog 发送 120 人限额提醒解除上报
- * @param {Object} params
- * @param {string} [params.ba] - 弹窗回传的校验 ba 凭据
- * @param {string} [params.token] - Zp_token 凭据
- * @param {Function} [params.fetchFn] - 可注入的 fetch 实现
- * @returns {Promise<Response>}
- */
-export async function confirmChatRemindLimit({ ba, token, fetchFn = globalThis.fetch } = {}) {
-  const url = new URL(BOSS_ENDPOINTS.CHAT_REMIND);
-  if (ba) {
-    url.searchParams.set('ba', String(ba));
-  }
-  url.searchParams.set('action', 'addf-limit-popup-c');
-
-  const headers = {};
-  if (token) {
-    headers['Zp_token'] = token;
-  }
-
-  return await fetchFn(url.toString(), {
-    method: 'POST',
-    headers,
-    credentials: 'include',
-  });
-}
-
-/**
  * 发送单笔投递请求 (核心底层网络请求方法)
  * @param {Object} data - 岗位参数
  * @param {string} data.securityId - BOSS直聘安全凭证 securityId
@@ -133,11 +119,11 @@ export async function confirmChatRemindLimit({ ba, token, fetchFn = globalThis.f
  * @param {string} [data.encryptJobId] - 岗位加密 ID 兼容别名
  * @param {string} [data.id] - 岗位 ID 兼容别名
  * @param {Object|string} [optionsOrErrorMsg={}] - 配置项对象或重试失败默认提示
- * @param {number} [retries=3] - 网络重试次数
+ * @param {number} [retries=1] - 兼容保留；投递 POST 不会自动重试，避免重复沟通
  * @param {Object} [_params={}] - 额外附加请求参数 (如 { cid: 1 })
  * @returns {Promise<Object>} 接口返回的原始 JSON 数据
  */
-export async function sendPublishReq(data, optionsOrErrorMsg = {}, retries = 3, _params = {}) {
+export async function sendPublishReq(data, optionsOrErrorMsg = {}, retries = 1, _params = {}) {
   // 规范化配置项，兼容对象参数与位置参数两种形式
   let options = {};
   if (typeof optionsOrErrorMsg === 'string') {
@@ -148,11 +134,6 @@ export async function sendPublishReq(data, optionsOrErrorMsg = {}, retries = 3, 
     };
   } else if (typeof optionsOrErrorMsg === 'object' && optionsOrErrorMsg !== null) {
     options = { ...optionsOrErrorMsg };
-  }
-
-  const currentRetries = options.retries !== undefined ? options.retries : 3;
-  if (currentRetries <= 0) {
-    throw new PublishError(options.errorMsg || '投递请求重试多次失败');
   }
 
   const targetJobId = data?.jobId || data?.encryptJobId || data?.id;
@@ -198,6 +179,10 @@ export async function sendPublishReq(data, optionsOrErrorMsg = {}, retries = 3, 
       credentials: 'include',
     });
 
+    if (rawRes.status === 401 || rawRes.status === 403) {
+      throw new AuthenticationError('登录状态已失效或无权访问，请重新登录后再试', { response: rawRes });
+    }
+
     const res = await rawRes.json();
 
     // code === 0: 投递成功
@@ -211,29 +196,17 @@ export async function sendPublishReq(data, optionsOrErrorMsg = {}, retries = 3, 
         res?.zpData?.bizData?.chatRemindDialog?.content || res?.message || '未知错误',
       );
 
-      // 1. 命中 120 位软限额弹窗 -> 自动确认解除限制并携带 { cid: 1 } 重试
+      if (/登录|未登录|身份失效|token失效/i.test(content)) {
+        throw new AuthenticationError(content, { response: res });
+      }
+
+      if (/验证码|安全验证|行为验证|人机验证/i.test(content)) {
+        throw new VerificationError(content, { response: res });
+      }
+
+      // 命中平台限额时停在当前页，交由用户在页面中手动处理。
       if (content.includes('120位') || content.includes('已与120位BOSS沟通')) {
-        // 防止携带 cid 仍反复返回 120 造成死循环
-        if (extraParams.cid === 1) {
-          throw new QuotaLimitError(`120位沟通限制确认后重试仍然受限: ${content}`, { response: res });
-        }
-
-        try {
-          const ba = res?.zpData?.bizData?.chatRemindDialog?.ba;
-          await confirmChatRemindLimit({ ba, token, fetchFn });
-
-          // 解除成功后，自动携带 { cid: 1 } 重新发起投递
-          return await sendPublishReq(data, {
-            ...options,
-            _params: { ...extraParams, cid: 1 },
-          });
-        } catch (err) {
-          if (err instanceof BossApiError) throw err;
-          throw new PublishError(`解除120位投递限制确认请求失败: ${err.message}`, {
-            details: err,
-            response: res,
-          });
-        }
+        throw new QuotaLimitError(`命中平台沟通限额，请在页面中手动确认后再继续: ${content}`, { response: res });
       }
 
       // 2. 命中 150 位硬性上限 -> 抛出 QuotaLimitError 触发业务熔断
@@ -258,16 +231,7 @@ export async function sendPublishReq(data, optionsOrErrorMsg = {}, retries = 3, 
       throw err;
     }
 
-    // 网络层抖动或超时，执行重试递减
-    if (currentRetries > 1) {
-      return await sendPublishReq(data, {
-        ...options,
-        retries: currentRetries - 1,
-        errorMsg: err?.message,
-      });
-    }
-
-    throw new PublishError(err?.message || '投递网络请求失败，已耗尽重试次数', { details: err });
+    throw new PublishError(err?.message || '投递网络请求失败；为避免重复沟通，未自动重试', { details: err });
   }
 }
 
@@ -395,9 +359,9 @@ export async function batchDeliverJobs(jobs, options = {}) {
       failedCount++;
 
       // 4. 限额 150 硬性熔断处理
-      if (err instanceof QuotaLimitError) {
+      if (err instanceof QuotaLimitError || err instanceof AuthenticationError || err instanceof VerificationError) {
         circuitBroken = true;
-        breakReason = `命中每日上限硬性限制 (150位): ${err.message}`;
+        breakReason = `命中需要人工处理的平台限制: ${err.message}`;
         const errorItem = {
           job,
           index: i,
@@ -408,7 +372,7 @@ export async function batchDeliverJobs(jobs, options = {}) {
         results.push(errorItem);
         errors.push({ job, error: err, isCircuitBreak: true });
         onProgress?.({ index: i, total: jobs.length, job, result: errorItem, status: 'quota_exhausted' });
-        onBreak?.({ reason: 'quota_exhausted', error: err, job, index: i });
+        onBreak?.({ reason: 'platform_intervention_required', error: err, job, index: i });
         break; // 立即熔断，不再执行任何后续网络请求
       }
 
@@ -483,9 +447,10 @@ if (typeof window !== 'undefined') {
     PublishError,
     QuotaLimitError,
     RateLimitError,
+    AuthenticationError,
+    VerificationError,
     BOSS_ENDPOINTS,
     extractBstToken,
-    confirmChatRemindLimit,
     sendPublishReq,
     deliverJob,
     batchDeliverJobs,

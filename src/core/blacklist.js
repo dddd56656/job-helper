@@ -85,7 +85,7 @@ class BlacklistEngine {
                 this.cache = new Set(
                     rawList
                         .filter(item => typeof item === 'string')
-                        .map(item => item.trim())
+                        .map(item => this.normalize(item))
                         .filter(Boolean)
                 );
             } else {
@@ -131,7 +131,7 @@ class BlacklistEngine {
         if (!companyName || typeof companyName !== 'string') return false;
         if (!this.initialized) this.init();
 
-        const trimmed = companyName.trim();
+        const trimmed = this.normalize(companyName);
         if (!trimmed) return false;
 
         // Fast-path: O(1) exact match
@@ -162,7 +162,7 @@ class BlacklistEngine {
         if (!companyName || typeof companyName !== 'string') return false;
         if (!this.initialized) this.init();
 
-        const trimmed = companyName.trim();
+        const trimmed = this.normalize(companyName);
         if (!trimmed) return false;
 
         if (!this.cache.has(trimmed)) {
@@ -182,7 +182,7 @@ class BlacklistEngine {
         if (!companyName || typeof companyName !== 'string') return false;
         if (!this.initialized) this.init();
 
-        const trimmed = companyName.trim();
+        const trimmed = this.normalize(companyName);
         if (this.cache.delete(trimmed)) {
             this.persist();
             return true;
@@ -205,6 +205,10 @@ class BlacklistEngine {
     get size() {
         if (!this.initialized) this.init();
         return this.cache.size;
+    }
+
+    normalize(companyName) {
+        return String(companyName || '').normalize('NFKC').toLocaleLowerCase().replace(/\s+/g, '').trim();
     }
 
     /**
@@ -238,7 +242,10 @@ class BlacklistEngine {
                 company = job.companyName || job.brandName || job.company || '';
             }
 
-            if (this.isBlocked(company, options)) {
+            const identifiers = typeof job === 'object' && job !== null
+                ? [company, job.encryptBrandId, job.brandId].filter(Boolean)
+                : [company];
+            if (identifiers.some((identifier) => this.isBlocked(identifier, options))) {
                 blocked.push(job);
             } else {
                 allowed.push(job);

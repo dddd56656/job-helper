@@ -20,14 +20,17 @@ class DeliveryScheduler {
         this.blacklist = options.blacklist || SchedulerBlacklist?.blacklist || browser.blacklist;
         this.limiter = options.limiter || SchedulerLimiter?.rateLimiter || browser.rateLimiter;
         this.api = options.api || browser.BossApi;
-        this.dailyLimit = Number.isFinite(options.dailyLimit) ? options.dailyLimit : 80;
+        this.dailyLimit = this._normalizeDailyLimit(options.dailyLimit);
+        this.maxConsecutiveFailures = Number.isFinite(options.maxConsecutiveFailures) ? Math.max(1, Math.floor(options.maxConsecutiveFailures)) : 3;
         this.pageBuffer = options.pageBuffer !== false;
         this.state = SCHEDULER_STATES.IDLE;
-        this.stats = { delivered: 0, blacklistSkipped: 0, contactedSkipped: 0, failed: 0, page: 0, limitReached: false, reason: null };
+        this.stats = { delivered: 0, blacklistSkipped: 0, contactedSkipped: 0, duplicateSkipped: 0, failed: 0, page: 0, limitReached: false, reason: null };
         this._listeners = new Set();
         this._runPromise = null;
         this._pauseWaiters = [];
         this._abortController = null;
+        this._seenJobIds = new Set();
+        this._consecutiveFailures = 0;
     }
 
     subscribe(listener) {
@@ -38,6 +41,7 @@ class DeliveryScheduler {
     }
 
     snapshot() { return { state: this.state, stats: { ...this.stats }, dailyLimit: this.dailyLimit }; }
+    _normalizeDailyLimit(value) { return Number.isFinite(value) ? Math.min(150, Math.max(1, Math.floor(value))) : 80; }
     _emit() { const view = this.snapshot(); this._listeners.forEach((fn) => { try { fn(view); } catch (_) {} }); }
     _setState(state, reason = null) { this.state = state; if (reason) this.stats.reason = reason; this._emit(); }
     _assertDependencies() {
@@ -93,26 +97,35 @@ class DeliveryScheduler {
             for (const job of allowed) {
                 if (!(await this._checkpoint())) return this.snapshot();
                 if (this.stats.delivered >= this.dailyLimit) { this.stats.limitReached = true; this._setState(SCHEDULER_STATES.COMPLETED, 'Daily delivery limit reached'); return this.snapshot(); }
+                const jobKey = job.id || job.encryptJobId || job.securityId;
+                if (jobKey && this._seenJobIds.has(jobKey)) { this.stats.duplicateSkipped++; this._emit(); continue; }
                 if (job.contacted) { this.stats.contactedSkipped++; this._emit(); continue; }
+                if (jobKey) this._seenJobIds.add(jobKey);
                 try {
                     await this.api.deliverJob(job);
                     this.stats.delivered++; this._emit();
+                    this._consecutiveFailures = 0;
                 } catch (error) {
                     this.stats.failed++; this._emit();
-                    if (this._isCircuitError(error)) { this.circuitBreak(error.message); return this.snapshot(); }
+                    this._consecutiveFailures++;
+                    if (this._isCircuitError(error) || this._consecutiveFailures >= this.maxConsecutiveFailures) {
+                        const reason = this._isCircuitError(error) ? error.message : `连续 ${this._consecutiveFailures} 次投递失败: ${error.message}`;
+                        this.circuitBreak(reason); return this.snapshot();
+                    }
                 }
                 if (this.stats.delivered < this.dailyLimit && !(await this._checkpoint())) return this.snapshot();
-                await this.limiter.afterDelivery({ signal: this._abortController.signal, isStopped: () => this.state !== SCHEDULER_STATES.RUNNING });
+                await this.limiter.afterDelivery({ signal: this._abortController.signal });
+                if (!(await this._checkpoint())) return this.snapshot();
             }
             if (this.stats.delivered >= this.dailyLimit) { this.stats.limitReached = true; this._setState(SCHEDULER_STATES.COMPLETED, 'Daily delivery limit reached'); return this.snapshot(); }
             if (!pageInfo.hasMore || jobs.length === 0) { this._setState(SCHEDULER_STATES.COMPLETED, 'No more pages'); return this.snapshot(); }
-            if (this.pageBuffer) await this.limiter.afterPageChange({ signal: this._abortController.signal, isStopped: () => this.state !== SCHEDULER_STATES.RUNNING });
+            if (this.pageBuffer) await this.limiter.afterPageChange({ signal: this._abortController.signal });
             if (!(await this._checkpoint())) return this.snapshot();
             if (!await this.adapter.next_page()) { this._setState(SCHEDULER_STATES.COMPLETED, 'No next page available'); return this.snapshot(); }
         }
         return this.snapshot();
     }
-    _isCircuitError(error) { return /QuotaLimitError|RateLimitError|quota|频控|150位/i.test(error?.name || '') || /quota|频控|150位|操作过于频繁/i.test(error?.message || ''); }
+    _isCircuitError(error) { return /QuotaLimitError|RateLimitError|AuthenticationError|VerificationError|quota|频控|150位/i.test(error?.name || '') || /quota|频控|150位|操作过于频繁|登录|验证/i.test(error?.message || ''); }
 }
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { DeliveryScheduler, SCHEDULER_STATES };
