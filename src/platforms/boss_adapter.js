@@ -213,11 +213,13 @@ class BossPlatformAdapter {
             const salaryEl = card.querySelector('.salary');
             const salaryDesc = salaryEl ? salaryEl.innerText.trim() : '';
             const secMatch = href.match(/securityId=([^&]+)/);
-            const securityId = card.dataset.securityId || (secMatch ? decodeURIComponent(secMatch[1]) : '');
+            const securityId = card.dataset.securityId || card.dataset.securityid || card.getAttribute('securityId') || card.getAttribute('data-security-id') || (secMatch ? decodeURIComponent(secMatch[1]) : '');
             const bossEl = card.querySelector('.boss-name');
             const bossName = bossEl ? bossEl.innerText.trim() : '';
             const encBossMatch = href.match(/encryptBossId=([^&]+)/);
-            const encryptBossId = card.dataset.encryptBossId || (encBossMatch ? decodeURIComponent(encBossMatch[1]) : '');
+            const encryptBossId = card.dataset.encryptBossId || card.dataset.bossId || card.getAttribute('data-boss-id') || (encBossMatch ? decodeURIComponent(encBossMatch[1]) : '');
+            const lidMatch = href.match(/lid=([^&]+)/);
+            const lid = card.dataset.lid || (lidMatch ? decodeURIComponent(lidMatch[1]) : '');
             if (encryptJobId || jobName) {
                 domItems.push({
                     encryptJobId,
@@ -227,6 +229,7 @@ class BossPlatformAdapter {
                     securityId,
                     bossName,
                     encryptBossId,
+                    lid,
                     contact: card.querySelector('.has-contact') !== null,
                 });
             }
@@ -278,6 +281,7 @@ class BossPlatformAdapter {
             bossTitle: item.bossTitle || '',
             encryptBrandId: item.encryptBrandId || '',
             encryptBossId: item.encryptBossId || '',
+            lid: item.lid || item.rawData?.lid || '',
             rawData: item
         };
     }

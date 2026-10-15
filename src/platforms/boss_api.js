@@ -185,6 +185,11 @@ export async function sendPublishReq(data, optionsOrErrorMsg = {}, retries = 3, 
   url.searchParams.set('securityId', targetSecurityId);
   url.searchParams.set('jobId', targetJobId);
 
+  const targetLid = data?.lid || data?.rawData?.lid;
+  if (targetLid) {
+    url.searchParams.set('lid', String(targetLid));
+  }
+
   const extraParams = options._params || {};
   for (const [key, val] of Object.entries(extraParams)) {
     if (val !== undefined && val !== null) {
@@ -299,6 +304,8 @@ export async function deliverJob(job, optionsOrJobId = {}, maybeOptions = {}) {
     jobData = {
       securityId: job.securityId,
       jobId: job.jobId || job.encryptJobId || job.id,
+      lid: job.lid || job.rawData?.lid,
+      rawData: job.rawData,
     };
     options = optionsOrJobId || {};
   } else {

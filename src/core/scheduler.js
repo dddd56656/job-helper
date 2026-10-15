@@ -148,7 +148,7 @@ class DeliveryScheduler {
                         : '您好！看到贵司正在招聘{jobName}，非常契合我的背景，希望能与您进一步沟通！';
                     const textToSend = this.renderGreeting(rawTemplate, job);
 
-                    await this.api.deliverJob(job, { greetingText: textToSend });
+                    const deliverRes = await this.api.deliverJob(job, { greetingText: textToSend });
                     this.stats.delivered++; this._emit();
                     this._consecutiveFailures = 0;
 
@@ -166,13 +166,26 @@ class DeliveryScheduler {
                                 if (this.greetingDelay > 0) {
                                     await new Promise((r) => setTimeout(r, this.greetingDelay));
                                 }
-                                const getBossFn = this.api?.getBossData || (SchedulerChat?.getBossData) || (typeof window !== 'undefined' ? window.getBossData : null) || (typeof unsafeWindow !== 'undefined' ? unsafeWindow.getBossData : null);
-                                if (typeof getBossFn === 'function' && typeof this.chatManager.sendMessage === 'function') {
-                                    const pageCtx = SchedulerChat?.getGlobalPageContext ? SchedulerChat.getGlobalPageContext() : (typeof window !== 'undefined' && window.getGlobalPageContext ? window.getGlobalPageContext() : {});
-                                    const currentEncUid = this.chatManager?.encryptUserId || pageCtx.encryptUserId || '';
-                                    const bossData = await getBossFn(job, {
-                                        encryptUserId: currentEncUid,
-                                    });
+
+                                // 优先从投递成功的响应 zpData 中直接提取 Boss 信息（免多发一次网络请求）
+                                const zpData = deliverRes?.data?.zpData || deliverRes?.zpData;
+                                let bossData = null;
+                                if (zpData && (zpData.bossId || zpData.uid)) {
+                                    bossData = {
+                                        bossId: zpData.bossId || zpData.uid,
+                                        friendSource: zpData.friendSource ?? 0,
+                                        encryptBossId: zpData.encryptBossId || job.encryptBossId || '',
+                                    };
+                                } else {
+                                    const getBossFn = this.api?.getBossData || (SchedulerChat?.getBossData) || (typeof window !== 'undefined' ? window.getBossData : null) || (typeof unsafeWindow !== 'undefined' ? unsafeWindow.getBossData : null);
+                                    if (typeof getBossFn === 'function') {
+                                        bossData = await getBossFn(job, {
+                                            encryptBossId: job.encryptBossId || job.bossId || '',
+                                        });
+                                    }
+                                }
+
+                                if (bossData && typeof this.chatManager.sendMessage === 'function') {
                                     await this.chatManager.sendMessage(bossData, textToSend.trim(), job);
                                 }
                             } catch (greetErr) {
@@ -181,7 +194,7 @@ class DeliveryScheduler {
                         }
                     }
                 } catch (error) {
-
+                    console.info(`[JobHelper] 岗位【${job.jobName || job.id} @ ${job.companyName || ''}】跳过投递/未成功: ${error?.message || error}`);
                     this.stats.failed++; this._emit();
                     this._consecutiveFailures++;
                     if (this._isCircuitError(error) || this._consecutiveFailures >= this.maxConsecutiveFailures) {

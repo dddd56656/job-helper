@@ -1355,23 +1355,18 @@ async function getBossData(job, options = {}) {
     throw new Error('缺少获取Boss信息的必要参数: securityId');
   }
 
-  let currentUserId = options.encryptUserId || job?.encryptUserId || ctx.encryptUserId;
-  // 若当前页面上下文缺失 encryptUserId，异步发起轻量个人基础信息接口兜底拉取
-  if (!currentUserId && typeof fetchFn === 'function') {
-    try {
-      const userRes = await fetchFn('https://www.zhipin.com/wapi/zpgeek/resume/getGeekBaseInfo.json', {
-        headers: { 'Zp_token': token },
-        credentials: 'include',
-      }).then((r) => r.json());
-      if (userRes?.code === 0 && userRes?.zpData?.encryptUserId) {
-        currentUserId = userRes.zpData.encryptUserId;
-        ctx.encryptUserId = currentUserId;
-      }
-    } catch (_) {}
-  }
+  // 关键修复：bossId 必须是目标 Boss 的加密 ID，优先从 options.encryptBossId、job 属性或 rawData 中获取
+  const targetBossId = options.encryptBossId ||
+    job?.encryptBossId ||
+    job?.encryptUserId ||
+    job?.bossId ||
+    job?.rawData?.encryptBossId ||
+    job?.rawData?.detail?.bossInfo?.encryptBossId ||
+    options.encryptUserId ||
+    ctx.encryptUserId;
 
-  if (!currentUserId) {
-    throw new Error('未获取到当前求职者 encryptUserId，无法获取 Boss 信息');
+  if (!targetBossId) {
+    throw new Error('缺少目标 Boss 的 ID 标识');
   }
 
   let lastError = null;
@@ -1379,12 +1374,12 @@ async function getBossData(job, options = {}) {
       let body;
       if (typeof FormData !== 'undefined') {
         body = new FormData();
-        body.append('bossId', String(currentUserId));
+        body.append('bossId', String(targetBossId));
         body.append('securityId', String(targetSecurityId));
         body.append('bossSrc', '0');
       } else {
         body = new URLSearchParams();
-        body.append('bossId', String(currentUserId));
+        body.append('bossId', String(targetBossId));
         body.append('securityId', String(targetSecurityId));
         body.append('bossSrc', '0');
       }
@@ -1895,11 +1890,13 @@ class BossPlatformAdapter {
             const salaryEl = card.querySelector('.salary');
             const salaryDesc = salaryEl ? salaryEl.innerText.trim() : '';
             const secMatch = href.match(/securityId=([^&]+)/);
-            const securityId = card.dataset.securityId || (secMatch ? decodeURIComponent(secMatch[1]) : '');
+            const securityId = card.dataset.securityId || card.dataset.securityid || card.getAttribute('securityId') || card.getAttribute('data-security-id') || (secMatch ? decodeURIComponent(secMatch[1]) : '');
             const bossEl = card.querySelector('.boss-name');
             const bossName = bossEl ? bossEl.innerText.trim() : '';
             const encBossMatch = href.match(/encryptBossId=([^&]+)/);
-            const encryptBossId = card.dataset.encryptBossId || (encBossMatch ? decodeURIComponent(encBossMatch[1]) : '');
+            const encryptBossId = card.dataset.encryptBossId || card.dataset.bossId || card.getAttribute('data-boss-id') || (encBossMatch ? decodeURIComponent(encBossMatch[1]) : '');
+            const lidMatch = href.match(/lid=([^&]+)/);
+            const lid = card.dataset.lid || (lidMatch ? decodeURIComponent(lidMatch[1]) : '');
             if (encryptJobId || jobName) {
                 domItems.push({
                     encryptJobId,
@@ -1909,6 +1906,7 @@ class BossPlatformAdapter {
                     securityId,
                     bossName,
                     encryptBossId,
+                    lid,
                     contact: card.querySelector('.has-contact') !== null,
                 });
             }
@@ -1960,6 +1958,7 @@ class BossPlatformAdapter {
             bossTitle: item.bossTitle || '',
             encryptBrandId: item.encryptBrandId || '',
             encryptBossId: item.encryptBossId || '',
+            lid: item.lid || item.rawData?.lid || '',
             rawData: item
         };
     }
@@ -2387,6 +2386,11 @@ async function sendPublishReq(data, optionsOrErrorMsg = {}, retries = 3, _params
   url.searchParams.set('securityId', targetSecurityId);
   url.searchParams.set('jobId', targetJobId);
 
+  const targetLid = data?.lid || data?.rawData?.lid;
+  if (targetLid) {
+    url.searchParams.set('lid', String(targetLid));
+  }
+
   const extraParams = options._params || {};
   for (const [key, val] of Object.entries(extraParams)) {
     if (val !== undefined && val !== null) {
@@ -2501,6 +2505,8 @@ async function deliverJob(job, optionsOrJobId = {}, maybeOptions = {}) {
     jobData = {
       securityId: job.securityId,
       jobId: job.jobId || job.encryptJobId || job.id,
+      lid: job.lid || job.rawData?.lid,
+      rawData: job.rawData,
     };
     options = optionsOrJobId || {};
   } else {
@@ -3111,7 +3117,7 @@ class DeliveryScheduler {
                         : '您好！看到贵司正在招聘{jobName}，非常契合我的背景，希望能与您进一步沟通！';
                     const textToSend = this.renderGreeting(rawTemplate, job);
 
-                    await this.api.deliverJob(job, { greetingText: textToSend });
+                    const deliverRes = await this.api.deliverJob(job, { greetingText: textToSend });
                     this.stats.delivered++; this._emit();
                     this._consecutiveFailures = 0;
 
@@ -3129,13 +3135,26 @@ class DeliveryScheduler {
                                 if (this.greetingDelay > 0) {
                                     await new Promise((r) => setTimeout(r, this.greetingDelay));
                                 }
-                                const getBossFn = this.api?.getBossData || (SchedulerChat?.getBossData) || (typeof window !== 'undefined' ? window.getBossData : null) || (typeof unsafeWindow !== 'undefined' ? unsafeWindow.getBossData : null);
-                                if (typeof getBossFn === 'function' && typeof this.chatManager.sendMessage === 'function') {
-                                    const pageCtx = SchedulerChat?.getGlobalPageContext ? SchedulerChat.getGlobalPageContext() : (typeof window !== 'undefined' && window.getGlobalPageContext ? window.getGlobalPageContext() : {});
-                                    const currentEncUid = this.chatManager?.encryptUserId || pageCtx.encryptUserId || '';
-                                    const bossData = await getBossFn(job, {
-                                        encryptUserId: currentEncUid,
-                                    });
+
+                                // 优先从投递成功的响应 zpData 中直接提取 Boss 信息（免多发一次网络请求）
+                                const zpData = deliverRes?.data?.zpData || deliverRes?.zpData;
+                                let bossData = null;
+                                if (zpData && (zpData.bossId || zpData.uid)) {
+                                    bossData = {
+                                        bossId: zpData.bossId || zpData.uid,
+                                        friendSource: zpData.friendSource ?? 0,
+                                        encryptBossId: zpData.encryptBossId || job.encryptBossId || '',
+                                    };
+                                } else {
+                                    const getBossFn = this.api?.getBossData || (SchedulerChat?.getBossData) || (typeof window !== 'undefined' ? window.getBossData : null) || (typeof unsafeWindow !== 'undefined' ? unsafeWindow.getBossData : null);
+                                    if (typeof getBossFn === 'function') {
+                                        bossData = await getBossFn(job, {
+                                            encryptBossId: job.encryptBossId || job.bossId || '',
+                                        });
+                                    }
+                                }
+
+                                if (bossData && typeof this.chatManager.sendMessage === 'function') {
                                     await this.chatManager.sendMessage(bossData, textToSend.trim(), job);
                                 }
                             } catch (greetErr) {
@@ -3144,7 +3163,7 @@ class DeliveryScheduler {
                         }
                     }
                 } catch (error) {
-
+                    console.info(`[JobHelper] 岗位【${job.jobName || job.id} @ ${job.companyName || ''}】跳过投递/未成功: ${error?.message || error}`);
                     this.stats.failed++; this._emit();
                     this._consecutiveFailures++;
                     if (this._isCircuitError(error) || this._consecutiveFailures >= this.maxConsecutiveFailures) {

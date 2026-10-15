@@ -633,23 +633,18 @@ export async function getBossData(job, options = {}) {
     throw new Error('缺少获取Boss信息的必要参数: securityId');
   }
 
-  let currentUserId = options.encryptUserId || job?.encryptUserId || ctx.encryptUserId;
-  // 若当前页面上下文缺失 encryptUserId，异步发起轻量个人基础信息接口兜底拉取
-  if (!currentUserId && typeof fetchFn === 'function') {
-    try {
-      const userRes = await fetchFn('https://www.zhipin.com/wapi/zpgeek/resume/getGeekBaseInfo.json', {
-        headers: { 'Zp_token': token },
-        credentials: 'include',
-      }).then((r) => r.json());
-      if (userRes?.code === 0 && userRes?.zpData?.encryptUserId) {
-        currentUserId = userRes.zpData.encryptUserId;
-        ctx.encryptUserId = currentUserId;
-      }
-    } catch (_) {}
-  }
+  // 关键修复：bossId 必须是目标 Boss 的加密 ID，优先从 options.encryptBossId、job 属性或 rawData 中获取
+  const targetBossId = options.encryptBossId ||
+    job?.encryptBossId ||
+    job?.encryptUserId ||
+    job?.bossId ||
+    job?.rawData?.encryptBossId ||
+    job?.rawData?.detail?.bossInfo?.encryptBossId ||
+    options.encryptUserId ||
+    ctx.encryptUserId;
 
-  if (!currentUserId) {
-    throw new Error('未获取到当前求职者 encryptUserId，无法获取 Boss 信息');
+  if (!targetBossId) {
+    throw new Error('缺少目标 Boss 的 ID 标识');
   }
 
   let lastError = null;
@@ -657,12 +652,12 @@ export async function getBossData(job, options = {}) {
       let body;
       if (typeof FormData !== 'undefined') {
         body = new FormData();
-        body.append('bossId', String(currentUserId));
+        body.append('bossId', String(targetBossId));
         body.append('securityId', String(targetSecurityId));
         body.append('bossSrc', '0');
       } else {
         body = new URLSearchParams();
-        body.append('bossId', String(currentUserId));
+        body.append('bossId', String(targetBossId));
         body.append('securityId', String(targetSecurityId));
         body.append('bossSrc', '0');
       }
