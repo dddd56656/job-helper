@@ -1897,6 +1897,10 @@ class BossPlatformAdapter {
             const encryptBossId = card.dataset.encryptBossId || card.dataset.bossId || card.getAttribute('data-boss-id') || (encBossMatch ? decodeURIComponent(encBossMatch[1]) : '');
             const lidMatch = href.match(/lid=([^&]+)/);
             const lid = card.dataset.lid || (lidMatch ? decodeURIComponent(lidMatch[1]) : '');
+            const contactBtn = card.querySelector('.btn-startchat, .btn, .op-btn, .has-contact, .chat-btn');
+            const btnText = contactBtn ? (contactBtn.innerText || contactBtn.textContent || '').trim() : '';
+            const isDomContacted = card.querySelector('.has-contact') !== null ||
+                /继续沟通|已沟通|已打招呼|聊一聊已满/i.test(btnText);
             if (encryptJobId || jobName) {
                 domItems.push({
                     encryptJobId,
@@ -1907,7 +1911,7 @@ class BossPlatformAdapter {
                     bossName,
                     encryptBossId,
                     lid,
-                    contact: card.querySelector('.has-contact') !== null,
+                    contact: isDomContacted,
                 });
             }
         });
@@ -1927,9 +1931,18 @@ class BossPlatformAdapter {
         const securityId = item.securityId || '';
         const jobName = item.jobName || item.positionName || '';
         const companyName = item.brandName || item.companyName || '';
-        const hrName = item.bossName || '';
+        const bossInfo = item.bossInfo || item.rawData?.bossInfo || {};
+        const hrName = item.bossName || bossInfo.name || '';
+        const bossTitle = item.bossTitle || bossInfo.title || '';
         const salaryDesc = item.salaryDesc || item.salary || '';
-        const contacted = Boolean(item.contact || item.bothTalked);
+        const contacted = Boolean(
+            item.contact ||
+            item.bothTalked ||
+            item.hasContact ||
+            item.friendStatus === 1 ||
+            item.friendStatus === 2 ||
+            item.status === 1
+        );
 
         // 拼接地理位置
         const cityDistrict = [
@@ -1940,6 +1953,14 @@ class BossPlatformAdapter {
 
         // 尝试映射对应的 DOM 卡片节点（用于高亮、加标或屏蔽）
         const rawNode = this._findJobCardNode(id, item.lid);
+
+        const encryptBossId = item.encryptBossId ||
+            bossInfo.encryptBossId ||
+            bossInfo.encryptUserId ||
+            item.encryptUserId ||
+            '';
+        const bossId = Number(item.bossId || bossInfo.bossId || 0);
+        const bossSource = Number(item.bossSource ?? bossInfo.bossSource ?? 0);
 
         return {
             id,
@@ -1955,9 +1976,11 @@ class BossPlatformAdapter {
             skills: Array.isArray(item.skills) ? item.skills : (item.jobLabels || []),
             jobLabels: Array.isArray(item.jobLabels) ? item.jobLabels : [],
             activeTime: item.lastModifyTime,
-            bossTitle: item.bossTitle || '',
-            encryptBrandId: item.encryptBrandId || '',
-            encryptBossId: item.encryptBossId || '',
+            bossTitle,
+            encryptBrandId: item.encryptBrandId || item.brandId || '',
+            encryptBossId,
+            bossId,
+            bossSource,
             lid: item.lid || item.rawData?.lid || '',
             rawData: item
         };
@@ -2459,6 +2482,16 @@ async function sendPublishReq(data, optionsOrErrorMsg = {}, retries = 3, _params
         throw new RateLimitError(content, { response: res });
       }
 
+      // 4. 命中“已沟通”响应，平滑转为已沟通状态放行
+      if (/已与该Boss沟通|已有沟通记录|已向该Boss发起过沟通|今日已打招呼|已有沟通/i.test(content)) {
+        return {
+          code: 0,
+          contacted: true,
+          message: content,
+          zpData: res?.zpData || {},
+        };
+      }
+
       // 其他业务错误
       throw new PublishError(content, { response: res });
     }
@@ -2516,6 +2549,7 @@ async function deliverJob(job, optionsOrJobId = {}, maybeOptions = {}) {
   const res = await sendPublishReq(jobData, options);
   return {
     success: true,
+    contacted: Boolean(res?.contacted),
     jobId: jobData.jobId,
     securityId: jobData.securityId,
     data: res,
@@ -3118,6 +3152,13 @@ class DeliveryScheduler {
                     const textToSend = this.renderGreeting(rawTemplate, job);
 
                     const deliverRes = await this.api.deliverJob(job, { greetingText: textToSend });
+                    if (deliverRes?.contacted) {
+                        this.stats.contactedSkipped++;
+                        this._emit();
+                        console.info(`[JobHelper] 岗位【${job.jobName || job.id} @ ${job.companyName || ''}】此前已沟通过，已自动排重跳过`);
+                        continue;
+                    }
+
                     this.stats.delivered++; this._emit();
                     this._consecutiveFailures = 0;
 
@@ -3136,20 +3177,41 @@ class DeliveryScheduler {
                                     await new Promise((r) => setTimeout(r, this.greetingDelay));
                                 }
 
-                                // 优先从投递成功的响应 zpData 中直接提取 Boss 信息（免多发一次网络请求）
+                                // 优先从岗位自带的 bossInfo 或 deliverRes 的 zpData 获取数字 bossId，无需额外网络请求
                                 const zpData = deliverRes?.data?.zpData || deliverRes?.zpData;
+                                const targetUid = Number(
+                                    zpData?.bossId ||
+                                    zpData?.uid ||
+                                    job.bossId ||
+                                    job.rawData?.bossInfo?.bossId ||
+                                    0
+                                );
+                                const encBossId = String(
+                                    zpData?.encryptBossId ||
+                                    job.encryptBossId ||
+                                    job.rawData?.bossInfo?.encryptBossId ||
+                                    ''
+                                );
+                                const friendSource = Number(
+                                    zpData?.friendSource ??
+                                    job.bossSource ??
+                                    job.rawData?.bossInfo?.bossSource ??
+                                    0
+                                );
+
                                 let bossData = null;
-                                if (zpData && (zpData.bossId || zpData.uid)) {
+                                if (targetUid > 0) {
                                     bossData = {
-                                        bossId: zpData.bossId || zpData.uid,
-                                        friendSource: zpData.friendSource ?? 0,
-                                        encryptBossId: zpData.encryptBossId || job.encryptBossId || '',
+                                        bossId: targetUid,
+                                        encryptBossId: encBossId,
+                                        friendSource,
                                     };
                                 } else {
                                     const getBossFn = this.api?.getBossData || (SchedulerChat?.getBossData) || (typeof window !== 'undefined' ? window.getBossData : null) || (typeof unsafeWindow !== 'undefined' ? unsafeWindow.getBossData : null);
                                     if (typeof getBossFn === 'function') {
-                                        bossData = await getBossFn(job, {
-                                            encryptBossId: job.encryptBossId || job.bossId || '',
+                                        const freshSecId = zpData?.securityId || job.securityId;
+                                        bossData = await getBossFn({ ...job, securityId: freshSecId }, {
+                                            encryptBossId: encBossId,
                                         });
                                     }
                                 }
@@ -3163,7 +3225,15 @@ class DeliveryScheduler {
                         }
                     }
                 } catch (error) {
-                    console.info(`[JobHelper] 岗位【${job.jobName || job.id} @ ${job.companyName || ''}】跳过投递/未成功: ${error?.message || error}`);
+                    const isBusinessSkip = /该Boss今日沟通|沟通人数已达上限|沟通已达上限|不满足Boss|职位已关闭|暂停招聘|猎头职位/i.test(error?.message || '');
+                    if (isBusinessSkip) {
+                        console.info(`[JobHelper] ℹ️ 岗位【${job.jobName || job.id} @ ${job.companyName || ''}】平台限制跳过: ${error?.message || error}`);
+                        this.stats.contactedSkipped++;
+                        this._emit();
+                        continue;
+                    }
+
+                    console.warn(`[JobHelper] ⚠️ 岗位【${job.jobName || job.id} @ ${job.companyName || ''}】投递异常: ${error?.message || error}`);
                     this.stats.failed++; this._emit();
                     this._consecutiveFailures++;
                     if (this._isCircuitError(error) || this._consecutiveFailures >= this.maxConsecutiveFailures) {

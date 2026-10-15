@@ -220,6 +220,10 @@ class BossPlatformAdapter {
             const encryptBossId = card.dataset.encryptBossId || card.dataset.bossId || card.getAttribute('data-boss-id') || (encBossMatch ? decodeURIComponent(encBossMatch[1]) : '');
             const lidMatch = href.match(/lid=([^&]+)/);
             const lid = card.dataset.lid || (lidMatch ? decodeURIComponent(lidMatch[1]) : '');
+            const contactBtn = card.querySelector('.btn-startchat, .btn, .op-btn, .has-contact, .chat-btn');
+            const btnText = contactBtn ? (contactBtn.innerText || contactBtn.textContent || '').trim() : '';
+            const isDomContacted = card.querySelector('.has-contact') !== null ||
+                /继续沟通|已沟通|已打招呼|聊一聊已满/i.test(btnText);
             if (encryptJobId || jobName) {
                 domItems.push({
                     encryptJobId,
@@ -230,7 +234,7 @@ class BossPlatformAdapter {
                     bossName,
                     encryptBossId,
                     lid,
-                    contact: card.querySelector('.has-contact') !== null,
+                    contact: isDomContacted,
                 });
             }
         });
@@ -250,9 +254,18 @@ class BossPlatformAdapter {
         const securityId = item.securityId || '';
         const jobName = item.jobName || item.positionName || '';
         const companyName = item.brandName || item.companyName || '';
-        const hrName = item.bossName || '';
+        const bossInfo = item.bossInfo || item.rawData?.bossInfo || {};
+        const hrName = item.bossName || bossInfo.name || '';
+        const bossTitle = item.bossTitle || bossInfo.title || '';
         const salaryDesc = item.salaryDesc || item.salary || '';
-        const contacted = Boolean(item.contact || item.bothTalked);
+        const contacted = Boolean(
+            item.contact ||
+            item.bothTalked ||
+            item.hasContact ||
+            item.friendStatus === 1 ||
+            item.friendStatus === 2 ||
+            item.status === 1
+        );
 
         // 拼接地理位置
         const cityDistrict = [
@@ -263,6 +276,14 @@ class BossPlatformAdapter {
 
         // 尝试映射对应的 DOM 卡片节点（用于高亮、加标或屏蔽）
         const rawNode = this._findJobCardNode(id, item.lid);
+
+        const encryptBossId = item.encryptBossId ||
+            bossInfo.encryptBossId ||
+            bossInfo.encryptUserId ||
+            item.encryptUserId ||
+            '';
+        const bossId = Number(item.bossId || bossInfo.bossId || 0);
+        const bossSource = Number(item.bossSource ?? bossInfo.bossSource ?? 0);
 
         return {
             id,
@@ -278,9 +299,11 @@ class BossPlatformAdapter {
             skills: Array.isArray(item.skills) ? item.skills : (item.jobLabels || []),
             jobLabels: Array.isArray(item.jobLabels) ? item.jobLabels : [],
             activeTime: item.lastModifyTime,
-            bossTitle: item.bossTitle || '',
-            encryptBrandId: item.encryptBrandId || '',
-            encryptBossId: item.encryptBossId || '',
+            bossTitle,
+            encryptBrandId: item.encryptBrandId || item.brandId || '',
+            encryptBossId,
+            bossId,
+            bossSource,
             lid: item.lid || item.rawData?.lid || '',
             rawData: item
         };

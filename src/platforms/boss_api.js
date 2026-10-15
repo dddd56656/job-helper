@@ -258,6 +258,16 @@ export async function sendPublishReq(data, optionsOrErrorMsg = {}, retries = 3, 
         throw new RateLimitError(content, { response: res });
       }
 
+      // 4. 命中“已沟通”响应，平滑转为已沟通状态放行
+      if (/已与该Boss沟通|已有沟通记录|已向该Boss发起过沟通|今日已打招呼|已有沟通/i.test(content)) {
+        return {
+          code: 0,
+          contacted: true,
+          message: content,
+          zpData: res?.zpData || {},
+        };
+      }
+
       // 其他业务错误
       throw new PublishError(content, { response: res });
     }
@@ -315,6 +325,7 @@ export async function deliverJob(job, optionsOrJobId = {}, maybeOptions = {}) {
   const res = await sendPublishReq(jobData, options);
   return {
     success: true,
+    contacted: Boolean(res?.contacted),
     jobId: jobData.jobId,
     securityId: jobData.securityId,
     data: res,
