@@ -1,0 +1,17 @@
+# Worktrees for parallel multi-terminal development
+worktrees/
+
+# Reference cloned repositories
+workspace/reference/
+workspace/
+
+# Internal development planning, prompts and temporary docs
+prompts/
+DESIGN_DOC.md
+plan.md
+TASK_PROMPTS.md
+
+# Logs and environment
+*.log
+.system_generated/
+node_modules/

@@ -1,75 +1,143 @@
-# job-helper
+# 招聘网站全能助手 (Job Helper Universal)
 
+> 一款专为求职者打造的跨平台、全自动化、高可用求职辅助油猴脚本。支持 **前程无忧 (51job)** 与 **BOSS直聘 (zhipin.com)** 双平台企业黑名单实时互通共享、智能卡片隐藏、全自动流水线投递、MQTT 协议高级自定义打招呼与防封限额熔断。
 
+---
 
+## 🌟 核心特性
 
+- 🚫 **双平台黑名单实时互通**
+  - 在前程无忧或 BOSS直聘 任意一边屏蔽企业，双平台即时同步并自动隐藏所有关联岗位卡片。
+  - 基于高吞吐 O(1) 内存索引与 GM 跨标签页双向广播存储，毫秒级响应。
+- 🚀 **全链路自动化投递流水线**
+  - 针对 BOSS直聘 深度集成，劫持底层响应式更新，实现原生无感自动切页。
+  - 支持自定义每日投递配额上限（1 ~ 150），达到上限或条件满足自动平稳结束。
+- 💬 **高级自定义招呼语（纯文本协议直达通道）**
+  - 针对招聘平台普通接口开场白失效的问题，采用 MQTT + Protobuf 二进制报文打通高级招呼语通道。
+  - 支持动态变量插值：`{jobName}`（岗位名称）、`{companyName}`（公司名称），开场白真实触达招聘人员。
+- 🛡️ **智能防封与限额熔断机制**
+  - **高斯随机延迟**：模拟真实人类点击行为，有效避免固定间隔引发的平台频控。
+  - **批量休整节拍**：每投递 10 个岗位自动进入安全休整周期。
+  - **120 人限额自愈**：检测到平台 120 位沟通提示弹窗时，自动向接口确认上报并携带凭证继续投递。
+  - **150 人硬限熔断**：触发单日硬封顶或风控告警时，立即硬性熔断急停，全方位守护求职账号安全。
+- 🎨 **自适应悬浮球与操作面板**
+  - 右下角变色悬浮球（蓝色：空闲，绿色：运行中，黄色：已暂停，红色：已熔断）。
+  - 320px 全能抽屉面板，集成实时投递统计、招呼语设置、黑名单单项移除与一键 JSON 导入/导出备份。
 
-安装油猴，新建脚本，然后将代码复制进去就可以使用了
+---
 
-免费提供VPN，v2ray地址如下，下载安装，然后导入链接即可，
+## 📦 安装与配置指南
 
+### 第一步：准备浏览器扩展
+请在主流浏览器（Chrome / Edge / Firefox / 360 / 搜狗等）中安装用户脚本管理器：
+- [Tampermonkey (油猴插件官网)](https://www.tampermonkey.net/)
+- 或 [ScriptCat (脚本猫官网)](https://docs.scriptcat.org/)
 
+### 第二步：安装脚本
+1. 打开 Tampermonkey 面板，点击 **“添加新脚本”**。
+2. 将本项目根目录下的 **[`job-helper.user.js`](job-helper.user.js)** 源码全文复制并粘贴覆盖到编辑器中。
+3. 点击菜单栏 **“文件” -> “保存”**（或使用快捷键 `Ctrl + S`）。
 
-![image-20251130092702956](README.assets/image-20251130092702956.png)
+### 第三步：开始使用
+打开或刷新 [前程无忧 (51job.com)](https://www.51job.com) 或 [BOSS直聘 (zhipin.com)](https://www.zhipin.com)，页面右下角将出现 **全能助手悬浮球**，卡片右上角将出现 **“🚫 屏蔽”** 操作条，即表示脚本已就绪！
 
-vless://2d535288-d08e-4de4-b674-fd8cb3c6e4d3@141.227.172.96:56089?encryption=none&security=none&type=grpc&authority=&serviceName=ZEDMODEON-ZEDMODEON-bia-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON-ZEDMODEON&mode=gun#test
+---
 
+## 📖 详细使用说明
 
+### 1. 屏蔽不良企业
+- 在浏览岗位列表时，将鼠标悬停在任意岗位卡片右上角，点击 **“🚫 屏蔽”** 按钮。
+- 确认后，该企业将立即加入全域黑名单，该卡片立刻在当前页面自动隐藏；同时在另一平台访问相同企业时，也会被自动屏蔽。
 
+### 2. 开启 BOSS直聘 自动投递
+1. 登录 BOSS直聘 网页版，进入推荐页或职位搜索页。
+2. 点击右下角 **悬浮球** 打开管理面板。
+3. **设置参数**：
+   - **每日上限**：默认 80 人（建议设置在 80~120 之间，最高支持 150）。
+   - **高级招呼语**：勾选启用，输入您的打招呼模板，支持 `{jobName}` 与 `{companyName}` 变量。
+   - *提示：建议点击面板中的“关闭自带招呼↗”链接，在 BOSS 官方设置中关闭系统默认招呼语，以确保自定义招呼语顺畅展示。*
+4. 点击 **“🚀 开始自动投递”**，脚本将自动进行黑名单过滤、排重、投递、获取 Boss 详情并下发高级招呼语。
 
+### 3. 暂停与急停
+- 运行过程中，屏幕下方会显示黑色胶囊通知条。
+- 点击胶囊条或面板中的 **“🛑 急停”** 按钮，流水线将立即中断停止。
 
-复制这一段
+### 4. 黑名单导入与导出备份
+- **导出备份**：点击面板中的 **“📤 导出备份”**，脚本将下载包含全部屏蔽企业的 JSON 文件。
+- **导入数据**：点击 **“📥 导入数据”**，选择历史备份或本项目 `docs/` 目录中的黑名单 JSON 文件，即可无缝合并。
 
+---
 
+## 🛠️ 项目工程化架构
 
-![image-20251130092807389](README.assets/image-20251130092807389.png)
+本项目采用高内聚、低耦合的模块化分层设计：
 
+```text
+├── src/
+│   ├── core/                  # 通用核心业务层
+│   │   ├── blacklist.js       # 跨平台共享黑名单引擎 (O(1) 索引 / 模糊匹配 / GM 存储监听)
+│   │   ├── rate_limiter.js    # 自适应速率控制器 (高斯正态抖动 / 批次安全休整)
+│   │   └── scheduler.js       # 全链路投递调度状态机 (空闲/运行/暂停/急停/熔断/完成)
+│   ├── platforms/             # 平台专用驱动与协议层
+│   │   ├── boss_adapter.js    # BOSS直聘标准适配器 (原生翻页与 DOM 状态同步)
+│   │   ├── boss_api.js        # BOSS直聘网络层 (投递请求/凭证提取/120限额自动解除/150熔断)
+│   │   ├── boss_chat.js       # 聊天与长连接层 (MQTT 通讯 / 官方 Protobuf 报文编解码 / wt 认证)
+│   │   ├── boss_hooks.js      # Vue 运行时劫持器 (数据劫持与原生方法绑定)
+│   │   └── job51_adapter.js   # 前程无忧平台适配器 (DOM 扫描 / 卡片屏蔽条注入 / 样式隔离)
+│   ├── ui/                    # 界面呈现层
+│   │   ├── fab.js             # 悬浮球组件 (状态变色与快捷联动)
+│   │   └── panel.js           # 抽屉式控制面板 (交互式配置 / 实时计数 / 导入导出)
+│   └── entry.js               # 全局自适应启动入口
+├── scripts/
+│   └── build-userscript.js    # 打包构建脚本 (模块组装与语法预编译校验)
+├── tests/                     # 自动化单测套件 (覆盖率与断言验证)
+├── job-helper.user.js         # 最终交付运行的生产油猴脚本
+└── README.md                  # 用户使用说明手册
+```
 
+### 本地构建与测试命令
 
+- **执行自动化单元测试**：
+  ```bash
+  node tests/blacklist_rate_test.js
+  node tests/boss_api_test.js
+  node tests/boss_hooks_test.js
+  node tests/boss_chat_test.js
+  node tests/job51_adapter_test.js
+  node tests/scheduler_test.js
+  ```
 
+- **重新打包油猴脚本**：
+  ```bash
+  node scripts/build-userscript.js
+  ```
 
-![image-20251130092522117](README.assets/image-20251130092522117.png)
+---
 
-![image-20251130092220985](README.assets/image-20251130092220985.png)
+## 🤝 交流与贡献
 
-
-
-![image-20251130092130017](README.assets/image-20251130092130017.png)
-
-
-
-如果有需要避雷的公司，请直接new isuue, 会进行调查然后默认排掉
-
-目前个人排除的公司放在docs文件夹里面，欢迎导入。
-
+欢迎通过 GitHub Issues 提交问题反馈、功能建议或提交待排查的企业避雷清单。
 
 <details>
-<summary><strong>🤝 Open for Work / 寻求工作 / 求職中 (Click to expand)</strong></summary>
+<summary><strong>🤝 Open for Work / 寻求工作 (点击展开)</strong></summary>
 
 <br>
 
 **🇨🇳 中文**
-> 说实话，我已经失业一年了。这一年很难熬，但我没让自己闲着。
-> 我现在的状态是：缺钱，但不缺技术。
-> 我需要一份工作，无论是 远程 (Remote)、外包 (Contract) 还是 全职 (Full-time)。
-> 只要能解决温饱，我就能干。如果您团队需要一个立刻就能上手干活的人，请联系我。
-
-**🇺🇸 English**
-> To be honest, I have been out of work for a year. It has been a challenging year, but I have used this time to keep my technical skills sharp.
-> My current status: Short on funds, but solid on technology.
-> I am looking for any employment opportunity: Remote, Contract, or Full-time.
-> I am willing to accept any role that covers basic living expenses.
-> If your team needs an immediate contributor who can start right away, please contact me.
-
-**🇯🇵 日本語**
-> 正直なところ、1年間失業しています。厳しい一年でしたが、その間も技術の研鑽は怠っていません。
-> 現状は、資金不足ですが、技術力には自信があります。
-> リモート、業務委託、正社員を問わず、仕事を探しています。
-> 生活費が賄えるのであれば、どのような案件でも引き受けます。
-> チームに即戦力を必要とされている方は、ぜひご連絡ください。
+> 目前状态：寻求全职 (Full-time)、远程 (Remote) 或项目外包 (Contract) 技术合作机会。
+> 具备扎实的全栈与自动化工程技术功底，如果您团队需要一名具备独立解决复杂技术问题、快速上手落地成果的开发者，欢迎随时与我联系。
 
 <br>
-**📍 Location:** Yueyang, Hunan, China (中国 湖南岳阳)
-**📧 Contact:** sww1248002362@163.com | **WeChat:** sww1248002362
 
-</details>    
+- **📧 邮箱 (Email):** sww1248002362@163.com
+- **💬 微信 (WeChat):** sww1248002362
+
+</details>
+
+---
+
+## ⚠️ 免责声明
+
+1. 本项目仅供技术研究、学习交流以及个人提升求职效率使用，请勿用于任何商业盈利目的。
+2. 使用本脚本时，请务必合理设置投递频率与每日限额，遵守各招聘平台的用户服务协议与相关法律法规。
+3. 因滥用自动化功能造成的任何限制或账号异常，项目开发者概不承担连带责任。
