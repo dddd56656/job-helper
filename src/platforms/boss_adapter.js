@@ -277,6 +277,13 @@ class BossPlatformAdapter {
         // 尝试映射对应的 DOM 卡片节点（用于高亮、加标或屏蔽）
         const rawNode = this._findJobCardNode(id, item.lid);
 
+        const isHunter = Boolean(
+            item.goldHunter === 1 ||
+            item.isHeadhunter ||
+            bossInfo.goldHunter === 1 ||
+            (rawNode && rawNode.querySelector('.gold-hunter, .hunter-icon, .icon-hunter, .job-hunter') !== null)
+        );
+
         const encryptBossId = item.encryptBossId ||
             bossInfo.encryptBossId ||
             bossInfo.encryptUserId ||
@@ -294,6 +301,7 @@ class BossPlatformAdapter {
             salaryDesc,
             cityDistrict,
             contacted,
+            isHunter,
             rawNode,
             // 扩展原始字段，供更深业务（如技能比对、活跃度评估）使用
             skills: Array.isArray(item.skills) ? item.skills : (item.jobLabels || []),

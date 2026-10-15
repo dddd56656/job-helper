@@ -141,6 +141,12 @@ class DeliveryScheduler {
                 const jobKey = job.id || job.encryptJobId || job.securityId;
                 if (jobKey && this._seenJobIds.has(jobKey)) { this.stats.duplicateSkipped++; this._emit(); continue; }
                 if (job.contacted) { this.stats.contactedSkipped++; this._emit(); continue; }
+                if (job.isHunter) {
+                    this.stats.contactedSkipped++;
+                    this._emit();
+                    console.info(`[JobHelper] 岗位【${job.jobName || job.id} @ ${job.companyName || ''}】为猎头顾问岗位，已自动过滤跳过`);
+                    continue;
+                }
                 if (jobKey) this._seenJobIds.add(jobKey);
                 try {
                     const rawTemplate = (this.customGreeting?.text && this.customGreeting.text.trim())
