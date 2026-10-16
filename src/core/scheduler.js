@@ -64,7 +64,7 @@ class DeliveryScheduler {
     }
 
     snapshot() { return { state: this.state, stats: { ...this.stats }, dailyLimit: this.dailyLimit }; }
-    _normalizeDailyLimit(value) { return Number.isFinite(value) ? Math.min(99999, Math.max(1, Math.floor(value))) : 80; }
+    _normalizeDailyLimit(value) { return Number.isFinite(value) ? Math.min(99999, Math.max(1, Math.floor(value))) : 99999; }
     _emit() { const view = this.snapshot(); this._listeners.forEach((fn) => { try { fn(view); } catch (_) {} }); }
     _setState(state, reason = null) { this.state = state; if (reason) this.stats.reason = reason; this._emit(); }
     _assertDependencies() {

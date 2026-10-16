@@ -3075,7 +3075,7 @@ class DeliveryScheduler {
     }
 
     snapshot() { return { state: this.state, stats: { ...this.stats }, dailyLimit: this.dailyLimit }; }
-    _normalizeDailyLimit(value) { return Number.isFinite(value) ? Math.min(99999, Math.max(1, Math.floor(value))) : 80; }
+    _normalizeDailyLimit(value) { return Number.isFinite(value) ? Math.min(99999, Math.max(1, Math.floor(value))) : 99999; }
     _emit() { const view = this.snapshot(); this._listeners.forEach((fn) => { try { fn(view); } catch (_) {} }); }
     _setState(state, reason = null) { this.state = state; if (reason) this.stats.reason = reason; this._emit(); }
     _assertDependencies() {
@@ -3400,7 +3400,7 @@ class UniversalPanel {
                     <div class="u-scheduler-box">
                         <div data-role="stats">状态：空闲<br>已投递：0<br>黑名单跳过：0<br>重复跳过：0<br>当前页：-</div>
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
-                            <label>每日上限: <input data-role="limit" type="number" min="1" max="99999" value="80" style="width:64px; padding:2px 4px; border:1px solid #ccc; border-radius:3px;"></label>
+                            <label>每日上限: <input data-role="limit" type="number" min="1" max="99999" value="99999" style="width:64px; padding:2px 4px; border:1px solid #ccc; border-radius:3px;"></label>
                             <button data-action="stop" class="u-btn-stop">🛑 急停</button>
                         </div>
                         <div style="margin-top:8px; border-top:1px dashed #e5e7eb; padding-top:6px;">
@@ -3444,15 +3444,22 @@ class UniversalPanel {
             const stopBtn = this.element.querySelector('[data-action="stop"]');
             stopBtn.addEventListener('click', () => this.onEmergencyStop());
 
-            const limitInput = this.element.querySelector('[data-role="limit"]');
-            limitInput.addEventListener('change', (e) => {
-                const val = Math.min(99999, Math.max(1, Number(e.target.value) || 80));
-                this.scheduler.dailyLimit = val;
-            });
-
-            // 自定义招呼语持久化与状态同步
             const gmGet = typeof GM_getValue === 'function' ? GM_getValue : (typeof window !== 'undefined' && window.GM_getValue ? window.GM_getValue : null);
             const gmSet = typeof GM_setValue === 'function' ? GM_setValue : (typeof window !== 'undefined' && window.GM_setValue ? window.GM_setValue : null);
+
+            const limitInput = this.element.querySelector('[data-role="limit"]');
+            const savedLimit = gmGet ? gmGet('universal_daily_limit', 99999) : 99999;
+            const initialLimit = Math.min(99999, Math.max(1, Number(savedLimit) || 99999));
+            this.scheduler.dailyLimit = initialLimit;
+            if (limitInput) limitInput.value = initialLimit;
+
+            if (limitInput) {
+                limitInput.addEventListener('change', (e) => {
+                    const val = Math.min(99999, Math.max(1, Number(e.target.value) || 99999));
+                    this.scheduler.dailyLimit = val;
+                    if (gmSet) gmSet('universal_daily_limit', val);
+                });
+            }
 
             const greetingEnable = this.element.querySelector('[data-role="greeting-enable"]');
             const greetingInput = this.element.querySelector('[data-role="greeting-input"]');
