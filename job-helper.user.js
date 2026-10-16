@@ -3075,7 +3075,7 @@ class DeliveryScheduler {
     }
 
     snapshot() { return { state: this.state, stats: { ...this.stats }, dailyLimit: this.dailyLimit }; }
-    _normalizeDailyLimit(value) { return Number.isFinite(value) ? Math.min(150, Math.max(1, Math.floor(value))) : 80; }
+    _normalizeDailyLimit(value) { return Number.isFinite(value) ? Math.min(99999, Math.max(1, Math.floor(value))) : 80; }
     _emit() { const view = this.snapshot(); this._listeners.forEach((fn) => { try { fn(view); } catch (_) {} }); }
     _setState(state, reason = null) { this.state = state; if (reason) this.stats.reason = reason; this._emit(); }
     _assertDependencies() {
@@ -3400,7 +3400,7 @@ class UniversalPanel {
                     <div class="u-scheduler-box">
                         <div data-role="stats">状态：空闲<br>已投递：0<br>黑名单跳过：0<br>重复跳过：0<br>当前页：-</div>
                         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:6px;">
-                            <label>每日上限: <input data-role="limit" type="number" min="1" max="150" value="80" style="width:48px; padding:2px 4px; border:1px solid #ccc; border-radius:3px;"></label>
+                            <label>每日上限: <input data-role="limit" type="number" min="1" max="99999" value="80" style="width:64px; padding:2px 4px; border:1px solid #ccc; border-radius:3px;"></label>
                             <button data-action="stop" class="u-btn-stop">🛑 急停</button>
                         </div>
                         <div style="margin-top:8px; border-top:1px dashed #e5e7eb; padding-top:6px;">
@@ -3446,7 +3446,7 @@ class UniversalPanel {
 
             const limitInput = this.element.querySelector('[data-role="limit"]');
             limitInput.addEventListener('change', (e) => {
-                const val = Math.min(150, Math.max(1, Number(e.target.value) || 80));
+                const val = Math.min(99999, Math.max(1, Number(e.target.value) || 80));
                 this.scheduler.dailyLimit = val;
             });
 
