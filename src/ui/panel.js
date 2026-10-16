@@ -31,7 +31,7 @@ class UniversalPanel {
 
         const styles = `
             .boss-action-bar { position: absolute; top: 0; right: 0; z-index: 999; display: none; border-bottom-left-radius: 8px; overflow: hidden; box-shadow: -2px 2px 8px rgba(0,0,0,0.15); background: white; }
-            .joblist-item:hover .boss-action-bar, .j_joblist .e:hover .boss-action-bar, .el:hover .boss-action-bar, .job-list-item:hover .boss-action-bar,
+            .joblist-item:hover .boss-action-bar, .sensors_exposure_jobitem:hover .boss-action-bar, [sensorsname="jobitem"]:hover .boss-action-bar, .job-item:hover .boss-action-bar, .j_joblist .e:hover .boss-action-bar, .el:hover .boss-action-bar, .job-list-item:hover .boss-action-bar,
             .job-card-box:hover .boss-action-bar, .job-card-wrapper:hover .boss-action-bar, li.job-primary:hover .boss-action-bar, .job-list-ul > li:hover .boss-action-bar, .job-card-body:hover .boss-action-bar { display: flex !important; }
             .boss-action-btn { padding: 6px 14px; font-size: 13px; cursor: pointer; font-weight: bold; color: white; display: flex; align-items: center; justify-content: center; }
             .boss-btn-block { background: #ff4d4f; }
@@ -365,7 +365,8 @@ class UniversalPanel {
         try {
             const parsed = JSON.parse(jsonContent);
             if (this.blacklist.importData) {
-                imported = this.blacklist.importData(parsed);
+                const res = this.blacklist.importData(parsed);
+                imported = (res && typeof res.count === 'number') ? res.count : (typeof res === 'number' ? res : 0);
             } else if (Array.isArray(parsed)) {
                 parsed.forEach(c => this.blacklist.addCompany(c));
                 imported = parsed.length;

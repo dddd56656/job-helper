@@ -218,17 +218,23 @@ class BlacklistEngine {
         if (!trimmed) return false;
 
         // Fast-path: O(1) exact match
-        if (this.cache.has(trimmed)) {
+        if (this.cache.has(trimmed) || this.cache.has(companyName.trim())) {
             return true;
         }
 
         const useFuzzy = typeof options.fuzzy === 'boolean' ? options.fuzzy : this.enableFuzzy;
         if (useFuzzy && this.cache.size > 0) {
             const lowerTarget = trimmed.toLowerCase();
+            const genericSuffixes = new Set(['公司', '科技', '技术', '网络', '信息', '服务', '集团', '有限', '企业', '中心']);
             for (const item of this.cache) {
-                const lowerItem = item.toLowerCase();
-                if (lowerTarget.includes(lowerItem) || lowerItem.includes(lowerTarget)) {
-                    return true;
+                const lowerItem = this.normalize(item);
+                if (lowerItem.length >= 2) {
+                    if (lowerTarget === lowerItem || lowerTarget.includes(lowerItem)) {
+                        return true;
+                    }
+                    if (lowerItem.includes(lowerTarget) && lowerTarget.length >= 3 && !genericSuffixes.has(lowerTarget)) {
+                        return true;
+                    }
                 }
             }
         }
@@ -291,7 +297,7 @@ class BlacklistEngine {
     }
 
     normalize(companyName) {
-        return String(companyName || '').normalize('NFKC').toLocaleLowerCase().replace(/\s+/g, '').trim();
+        return String(companyName || '').normalize('NFKC').toLocaleLowerCase().replace(/\s+/g, '').replace(/[.。…]+$/, '').trim();
     }
 
     /**
@@ -2787,6 +2793,11 @@ class Job51Adapter {
     constructor(options = {}) {
         this.cardSelectors = options.cardSelectors || [
             '.joblist-item',
+            '.sensors_exposure_jobitem',
+            '[sensorsname="jobitem"]',
+            '[sensors_exposure_jobitem]',
+            '.job-item',
+            '.joblist .item',
             '.j_joblist .e',
             '.el',
             '.job-list-item'
@@ -2794,6 +2805,16 @@ class Job51Adapter {
         this.nameSelectors = options.nameSelectors || [
             '.cname a',
             '.cname',
+            'a.cname',
+            '.company-name a',
+            '.company-name',
+            '.com-name',
+            '.com_name',
+            'a[href*="/company/"]',
+            'a[href*="jobs.51job.com/all/co"]',
+            'a[href*="51job.com/company"]',
+            '[sensorsname="company_name"]',
+            '[sensorsname="com_name"]',
             '.t2 a',
             '.er a',
             '.company_name'
@@ -2803,55 +2824,56 @@ class Job51Adapter {
         this.scanIntervalMs = options.scanIntervalMs || 500;
     }
 
-    /**
-     * 判断当前是否为前程无忧站点
-     * @param {string} [host]
-     * @returns {boolean}
-     */
     isMatched(host) {
         const targetHost = host || (typeof location !== 'undefined' ? location.host : '');
         return targetHost.includes('51job.com');
     }
 
-    /**
-     * 从卡片 DOM 中提取公司名称
-     * @param {Element} card
-     * @returns {string}
-     */
     getCompanyName(card) {
         if (!card || typeof card.querySelector !== 'function') return '';
         for (const selector of this.nameSelectors) {
             const el = card.querySelector(selector);
             if (el) {
-                const text = (el.innerText || el.textContent || '').trim();
-                if (text) return text;
+                const titleAttr = typeof el.getAttribute === 'function' ? el.getAttribute('title') : null;
+                const childTitle = (!titleAttr && el.querySelector && typeof el.querySelector === 'function')
+                    ? (el.querySelector('[title]')?.getAttribute('title'))
+                    : null;
+                const text = (titleAttr || childTitle || el.innerText || el.textContent || '').trim();
+                const cleaned = text.replace(/[.。…]+$/, '').trim();
+                if (cleaned) return cleaned;
             }
         }
         return '';
     }
 
-    /**
-     * 更新卡片显隐状态
-     * @param {Element} card
-     * @param {Object} blacklist - BlacklistEngine 实例
-     * @returns {boolean} 是否被屏蔽
-     */
     updateVisibility(card, blacklist) {
         if (!card) return false;
-        const companyName = card.dataset.companyName || this.getCompanyName(card);
+        const companyName = this.getCompanyName(card) || card.dataset.companyName;
         if (!companyName) return false;
         card.dataset.companyName = companyName;
 
         const isBlocked = blacklist && typeof blacklist.isBlocked === 'function'
-            ? blacklist.isBlocked(companyName)
+            ? blacklist.isBlocked(companyName, { fuzzy: true })
             : false;
 
         if (isBlocked) {
             if (!card.classList.contains('universal-blocked')) {
                 card.classList.add('universal-blocked');
             }
+            if (card.style && typeof card.style.setProperty === 'function') {
+                card.style.setProperty('display', 'none', 'important');
+            } else if (card.style) {
+                card.style.display = 'none';
+            }
         } else {
             card.classList.remove('universal-blocked');
+            if (card.style && typeof card.style.removeProperty === 'function') {
+                if (card.style.display === 'none') {
+                    card.style.removeProperty('display');
+                }
+            } else if (card.style && card.style.display === 'none') {
+                card.style.display = '';
+            }
         }
         return isBlocked;
     }
@@ -2897,7 +2919,8 @@ class Job51Adapter {
                 if (blacklist && typeof blacklist.addCompany === 'function') {
                     blacklist.addCompany(companyName);
                 }
-                this.updateVisibility(card, blacklist);
+                const currentDoc = card.ownerDocument || (typeof document !== 'undefined' ? document : null);
+                this.refresh(blacklist, currentDoc);
                 if (typeof onBlocked === 'function') {
                     onBlocked(companyName);
                 }
@@ -2908,12 +2931,6 @@ class Job51Adapter {
         card.appendChild(bar);
     }
 
-    /**
-     * 处理单张卡片：提取名称、注入按钮、更新显隐
-     * @param {Element} card
-     * @param {Object} blacklist
-     * @param {Function} [onBlocked]
-     */
     processCard(card, blacklist, onBlocked) {
         if (!card || typeof card.querySelector !== 'function') return;
         if (card.dataset.uProcessed === 'true') {
@@ -2930,11 +2947,6 @@ class Job51Adapter {
         card.dataset.uProcessed = 'true';
     }
 
-    /**
-     * 刷新当前页面所有已渲染卡片显隐
-     * @param {Object} blacklist
-     * @param {Element} [root]
-     */
     refresh(blacklist, root) {
         const doc = root || (typeof document !== 'undefined' ? document : null);
         if (!doc) return;
@@ -2943,13 +2955,6 @@ class Job51Adapter {
         cards.forEach(c => this.updateVisibility(c, blacklist));
     }
 
-    /**
-     * 启动 DOM 监听扫描器
-     * @param {Object} config
-     * @param {Object} config.blacklist
-     * @param {Element} [config.root]
-     * @param {Function} [config.onBlocked]
-     */
     initScanner({ blacklist, root, onBlocked } = {}) {
         const doc = root || (typeof document !== 'undefined' ? document : null);
         if (!doc) return;
@@ -2960,11 +2965,10 @@ class Job51Adapter {
             cards.forEach(c => this.processCard(c, blacklist, onBlocked));
         };
 
-        // 首次立即执行
         run();
 
-        // MutationObserver 监听动态插入卡片
-        if (typeof MutationObserver !== 'undefined' && doc.body) {
+        const observeTarget = doc.body || doc.documentElement;
+        if (typeof MutationObserver !== 'undefined' && observeTarget) {
             this.observer = new MutationObserver((mutations) => {
                 let shouldRun = false;
                 for (const m of mutations) {
@@ -2975,10 +2979,9 @@ class Job51Adapter {
                 }
                 if (shouldRun) run();
             });
-            this.observer.observe(doc.body, { childList: true, subtree: true });
+            this.observer.observe(observeTarget, { childList: true, subtree: true });
         }
 
-        // 定时轮询兜底
         if (typeof setInterval !== 'undefined') {
             this.intervalId = setInterval(run, this.scanIntervalMs);
         }
@@ -3321,7 +3324,7 @@ class UniversalPanel {
 
         const styles = `
             .boss-action-bar { position: absolute; top: 0; right: 0; z-index: 999; display: none; border-bottom-left-radius: 8px; overflow: hidden; box-shadow: -2px 2px 8px rgba(0,0,0,0.15); background: white; }
-            .joblist-item:hover .boss-action-bar, .j_joblist .e:hover .boss-action-bar, .el:hover .boss-action-bar, .job-list-item:hover .boss-action-bar,
+            .joblist-item:hover .boss-action-bar, .sensors_exposure_jobitem:hover .boss-action-bar, [sensorsname="jobitem"]:hover .boss-action-bar, .job-item:hover .boss-action-bar, .j_joblist .e:hover .boss-action-bar, .el:hover .boss-action-bar, .job-list-item:hover .boss-action-bar,
             .job-card-box:hover .boss-action-bar, .job-card-wrapper:hover .boss-action-bar, li.job-primary:hover .boss-action-bar, .job-list-ul > li:hover .boss-action-bar, .job-card-body:hover .boss-action-bar { display: flex !important; }
             .boss-action-btn { padding: 6px 14px; font-size: 13px; cursor: pointer; font-weight: bold; color: white; display: flex; align-items: center; justify-content: center; }
             .boss-btn-block { background: #ff4d4f; }
@@ -3655,7 +3658,8 @@ class UniversalPanel {
         try {
             const parsed = JSON.parse(jsonContent);
             if (this.blacklist.importData) {
-                imported = this.blacklist.importData(parsed);
+                const res = this.blacklist.importData(parsed);
+                imported = (res && typeof res.count === 'number') ? res.count : (typeof res === 'number' ? res : 0);
             } else if (Array.isArray(parsed)) {
                 parsed.forEach(c => this.blacklist.addCompany(c));
                 imported = parsed.length;
@@ -3842,6 +3846,7 @@ if (typeof window !== 'undefined') {
             adapter.initScanner({
                 blacklist,
                 onBlocked: (name) => {
+                    adapter.refresh(blacklist);
                     panel.renderBlacklist();
                     panel.showToast(`已屏蔽【${name}】并隐藏卡片`, 2000);
                 }
@@ -3881,7 +3886,11 @@ if (typeof window !== 'undefined') {
             let companyName = '';
             for (const sel of bossNameSelectors) {
                 const el = card.querySelector(sel);
-                if (el && el.innerText) { companyName = el.innerText.trim(); break; }
+                if (el) {
+                    const title = typeof el.getAttribute === 'function' ? el.getAttribute('title') : null;
+                    const text = (title || el.innerText || el.textContent || '').trim();
+                    if (text) { companyName = text.replace(/[.。…]+$/, '').trim(); break; }
+                }
             }
             if (!companyName) return;
             card.dataset.companyName = companyName;
@@ -3899,7 +3908,7 @@ if (typeof window !== 'undefined') {
                     e.stopPropagation(); e.preventDefault();
                     if (confirm(`确定要将【${companyName}】加入黑名单并隐藏吗？`)) {
                         blacklist.addCompany(companyName);
-                        updateBossCardVisibility(card);
+                        document.querySelectorAll(bossCardSelectors.join(',')).forEach(updateBossCardVisibility);
                         panel.renderBlacklist();
                         panel.showToast(`已屏蔽【${companyName}】`, 2000);
                     }
@@ -3915,10 +3924,12 @@ if (typeof window !== 'undefined') {
         const updateBossCardVisibility = (card) => {
             const name = card.dataset.companyName;
             if (!name) return;
-            if (blacklist && blacklist.isBlocked(name)) {
+            if (blacklist && blacklist.isBlocked(name, { fuzzy: true })) {
                 card.classList.add('universal-blocked');
+                if (card.style && typeof card.style.setProperty === 'function') card.style.setProperty('display', 'none', 'important');
             } else {
                 card.classList.remove('universal-blocked');
+                if (card.style && card.style.display === 'none') card.style.removeProperty('display');
             }
         };
 

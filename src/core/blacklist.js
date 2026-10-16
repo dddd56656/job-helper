@@ -198,17 +198,23 @@ class BlacklistEngine {
         if (!trimmed) return false;
 
         // Fast-path: O(1) exact match
-        if (this.cache.has(trimmed)) {
+        if (this.cache.has(trimmed) || this.cache.has(companyName.trim())) {
             return true;
         }
 
         const useFuzzy = typeof options.fuzzy === 'boolean' ? options.fuzzy : this.enableFuzzy;
         if (useFuzzy && this.cache.size > 0) {
             const lowerTarget = trimmed.toLowerCase();
+            const genericSuffixes = new Set(['公司', '科技', '技术', '网络', '信息', '服务', '集团', '有限', '企业', '中心']);
             for (const item of this.cache) {
-                const lowerItem = item.toLowerCase();
-                if (lowerTarget.includes(lowerItem) || lowerItem.includes(lowerTarget)) {
-                    return true;
+                const lowerItem = this.normalize(item);
+                if (lowerItem.length >= 2) {
+                    if (lowerTarget === lowerItem || lowerTarget.includes(lowerItem)) {
+                        return true;
+                    }
+                    if (lowerItem.includes(lowerTarget) && lowerTarget.length >= 3 && !genericSuffixes.has(lowerTarget)) {
+                        return true;
+                    }
                 }
             }
         }
@@ -271,7 +277,7 @@ class BlacklistEngine {
     }
 
     normalize(companyName) {
-        return String(companyName || '').normalize('NFKC').toLocaleLowerCase().replace(/\s+/g, '').trim();
+        return String(companyName || '').normalize('NFKC').toLocaleLowerCase().replace(/\s+/g, '').replace(/[.。…]+$/, '').trim();
     }
 
     /**

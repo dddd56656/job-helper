@@ -32,6 +32,7 @@
             adapter.initScanner({
                 blacklist,
                 onBlocked: (name) => {
+                    adapter.refresh(blacklist);
                     panel.renderBlacklist();
                     panel.showToast(`已屏蔽【${name}】并隐藏卡片`, 2000);
                 }
@@ -71,7 +72,11 @@
             let companyName = '';
             for (const sel of bossNameSelectors) {
                 const el = card.querySelector(sel);
-                if (el && el.innerText) { companyName = el.innerText.trim(); break; }
+                if (el) {
+                    const title = typeof el.getAttribute === 'function' ? el.getAttribute('title') : null;
+                    const text = (title || el.innerText || el.textContent || '').trim();
+                    if (text) { companyName = text.replace(/[.。…]+$/, '').trim(); break; }
+                }
             }
             if (!companyName) return;
             card.dataset.companyName = companyName;
@@ -89,7 +94,7 @@
                     e.stopPropagation(); e.preventDefault();
                     if (confirm(`确定要将【${companyName}】加入黑名单并隐藏吗？`)) {
                         blacklist.addCompany(companyName);
-                        updateBossCardVisibility(card);
+                        document.querySelectorAll(bossCardSelectors.join(',')).forEach(updateBossCardVisibility);
                         panel.renderBlacklist();
                         panel.showToast(`已屏蔽【${companyName}】`, 2000);
                     }
@@ -105,10 +110,12 @@
         const updateBossCardVisibility = (card) => {
             const name = card.dataset.companyName;
             if (!name) return;
-            if (blacklist && blacklist.isBlocked(name)) {
+            if (blacklist && blacklist.isBlocked(name, { fuzzy: true })) {
                 card.classList.add('universal-blocked');
+                if (card.style && typeof card.style.setProperty === 'function') card.style.setProperty('display', 'none', 'important');
             } else {
                 card.classList.remove('universal-blocked');
+                if (card.style && card.style.display === 'none') card.style.removeProperty('display');
             }
         };
 

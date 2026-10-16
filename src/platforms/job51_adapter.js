@@ -13,6 +13,11 @@ class Job51Adapter {
     constructor(options = {}) {
         this.cardSelectors = options.cardSelectors || [
             '.joblist-item',
+            '.sensors_exposure_jobitem',
+            '[sensorsname="jobitem"]',
+            '[sensors_exposure_jobitem]',
+            '.job-item',
+            '.joblist .item',
             '.j_joblist .e',
             '.el',
             '.job-list-item'
@@ -20,6 +25,16 @@ class Job51Adapter {
         this.nameSelectors = options.nameSelectors || [
             '.cname a',
             '.cname',
+            'a.cname',
+            '.company-name a',
+            '.company-name',
+            '.com-name',
+            '.com_name',
+            'a[href*="/company/"]',
+            'a[href*="jobs.51job.com/all/co"]',
+            'a[href*="51job.com/company"]',
+            '[sensorsname="company_name"]',
+            '[sensorsname="com_name"]',
             '.t2 a',
             '.er a',
             '.company_name'
@@ -29,55 +44,56 @@ class Job51Adapter {
         this.scanIntervalMs = options.scanIntervalMs || 500;
     }
 
-    /**
-     * 判断当前是否为前程无忧站点
-     * @param {string} [host]
-     * @returns {boolean}
-     */
     isMatched(host) {
         const targetHost = host || (typeof location !== 'undefined' ? location.host : '');
         return targetHost.includes('51job.com');
     }
 
-    /**
-     * 从卡片 DOM 中提取公司名称
-     * @param {Element} card
-     * @returns {string}
-     */
     getCompanyName(card) {
         if (!card || typeof card.querySelector !== 'function') return '';
         for (const selector of this.nameSelectors) {
             const el = card.querySelector(selector);
             if (el) {
-                const text = (el.innerText || el.textContent || '').trim();
-                if (text) return text;
+                const titleAttr = typeof el.getAttribute === 'function' ? el.getAttribute('title') : null;
+                const childTitle = (!titleAttr && el.querySelector && typeof el.querySelector === 'function')
+                    ? (el.querySelector('[title]')?.getAttribute('title'))
+                    : null;
+                const text = (titleAttr || childTitle || el.innerText || el.textContent || '').trim();
+                const cleaned = text.replace(/[.。…]+$/, '').trim();
+                if (cleaned) return cleaned;
             }
         }
         return '';
     }
 
-    /**
-     * 更新卡片显隐状态
-     * @param {Element} card
-     * @param {Object} blacklist - BlacklistEngine 实例
-     * @returns {boolean} 是否被屏蔽
-     */
     updateVisibility(card, blacklist) {
         if (!card) return false;
-        const companyName = card.dataset.companyName || this.getCompanyName(card);
+        const companyName = this.getCompanyName(card) || card.dataset.companyName;
         if (!companyName) return false;
         card.dataset.companyName = companyName;
 
         const isBlocked = blacklist && typeof blacklist.isBlocked === 'function'
-            ? blacklist.isBlocked(companyName)
+            ? blacklist.isBlocked(companyName, { fuzzy: true })
             : false;
 
         if (isBlocked) {
             if (!card.classList.contains('universal-blocked')) {
                 card.classList.add('universal-blocked');
             }
+            if (card.style && typeof card.style.setProperty === 'function') {
+                card.style.setProperty('display', 'none', 'important');
+            } else if (card.style) {
+                card.style.display = 'none';
+            }
         } else {
             card.classList.remove('universal-blocked');
+            if (card.style && typeof card.style.removeProperty === 'function') {
+                if (card.style.display === 'none') {
+                    card.style.removeProperty('display');
+                }
+            } else if (card.style && card.style.display === 'none') {
+                card.style.display = '';
+            }
         }
         return isBlocked;
     }
@@ -123,7 +139,8 @@ class Job51Adapter {
                 if (blacklist && typeof blacklist.addCompany === 'function') {
                     blacklist.addCompany(companyName);
                 }
-                this.updateVisibility(card, blacklist);
+                const currentDoc = card.ownerDocument || (typeof document !== 'undefined' ? document : null);
+                this.refresh(blacklist, currentDoc);
                 if (typeof onBlocked === 'function') {
                     onBlocked(companyName);
                 }
@@ -134,12 +151,6 @@ class Job51Adapter {
         card.appendChild(bar);
     }
 
-    /**
-     * 处理单张卡片：提取名称、注入按钮、更新显隐
-     * @param {Element} card
-     * @param {Object} blacklist
-     * @param {Function} [onBlocked]
-     */
     processCard(card, blacklist, onBlocked) {
         if (!card || typeof card.querySelector !== 'function') return;
         if (card.dataset.uProcessed === 'true') {
@@ -156,11 +167,6 @@ class Job51Adapter {
         card.dataset.uProcessed = 'true';
     }
 
-    /**
-     * 刷新当前页面所有已渲染卡片显隐
-     * @param {Object} blacklist
-     * @param {Element} [root]
-     */
     refresh(blacklist, root) {
         const doc = root || (typeof document !== 'undefined' ? document : null);
         if (!doc) return;
@@ -169,13 +175,6 @@ class Job51Adapter {
         cards.forEach(c => this.updateVisibility(c, blacklist));
     }
 
-    /**
-     * 启动 DOM 监听扫描器
-     * @param {Object} config
-     * @param {Object} config.blacklist
-     * @param {Element} [config.root]
-     * @param {Function} [config.onBlocked]
-     */
     initScanner({ blacklist, root, onBlocked } = {}) {
         const doc = root || (typeof document !== 'undefined' ? document : null);
         if (!doc) return;
@@ -186,11 +185,10 @@ class Job51Adapter {
             cards.forEach(c => this.processCard(c, blacklist, onBlocked));
         };
 
-        // 首次立即执行
         run();
 
-        // MutationObserver 监听动态插入卡片
-        if (typeof MutationObserver !== 'undefined' && doc.body) {
+        const observeTarget = doc.body || doc.documentElement;
+        if (typeof MutationObserver !== 'undefined' && observeTarget) {
             this.observer = new MutationObserver((mutations) => {
                 let shouldRun = false;
                 for (const m of mutations) {
@@ -201,10 +199,9 @@ class Job51Adapter {
                 }
                 if (shouldRun) run();
             });
-            this.observer.observe(doc.body, { childList: true, subtree: true });
+            this.observer.observe(observeTarget, { childList: true, subtree: true });
         }
 
-        // 定时轮询兜底
         if (typeof setInterval !== 'undefined') {
             this.intervalId = setInterval(run, this.scanIntervalMs);
         }
